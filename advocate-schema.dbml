@@ -1,0 +1,126 @@
+erDiagram
+
+    USERS {
+        uuid id PK
+        string email
+        string password_hash
+        string role
+        datetime created_at
+        datetime updated_at
+    }
+
+    ADVOCATES {
+        uuid id PK
+        uuid user_id FK
+        string full_name
+        string phone
+        string location_city
+        string location_state
+        int years_experience
+        string onboarding_status
+        string verification_status
+        int profile_completion_pct
+        text bio
+        datetime created_at
+        datetime updated_at
+    }
+
+    ADVOCATE_DOCUMENTS {
+        uuid id PK
+        uuid advocate_id FK
+        string doc_type
+        string doc_number
+        string file_url
+        string status
+        datetime verified_at
+        datetime created_at
+        datetime updated_at
+    }
+
+    SPECIALIZATIONS {
+        uuid id PK
+        string name
+        datetime created_at
+    }
+
+    ADVOCATE_SPECIALIZATIONS {
+        uuid id PK
+        uuid advocate_id FK
+        uuid specialization_id FK
+        datetime created_at
+    }
+
+    LANGUAGES {
+        uuid id PK
+        string name
+        datetime created_at
+    }
+
+    ADVOCATE_LANGUAGES {
+        uuid id PK
+        uuid advocate_id FK
+        uuid language_id FK
+        datetime created_at
+    }
+
+    ADVOCATE_AVAILABILITY {
+        uuid id PK
+        uuid advocate_id FK
+        int day_of_week
+        time start_time
+        time end_time
+        string mode
+        datetime created_at
+        datetime updated_at
+    }
+
+    ADVOCATE_PRICING {
+        uuid id PK
+        uuid advocate_id FK
+        string consultation_type
+        decimal consultation_fee
+        string currency
+        datetime created_at
+        datetime updated_at
+    }
+
+    CONSULTATIONS {
+        uuid id PK
+        uuid advocate_id FK
+        uuid client_id FK
+        datetime scheduled_at
+        string consultation_mode
+        string status
+        text issue_summary
+        datetime created_at
+        datetime updated_at
+    }
+
+    PAYMENTS {
+        uuid id PK
+        uuid consultation_id FK
+        decimal amount
+        string currency
+        string payment_status
+        string payment_method
+        datetime paid_at
+        datetime created_at
+    }
+
+    USERS ||--|| ADVOCATES : owns
+
+    ADVOCATES ||--o{ ADVOCATE_DOCUMENTS : uploads
+
+    ADVOCATES ||--o{ ADVOCATE_SPECIALIZATIONS : has
+    SPECIALIZATIONS ||--o{ ADVOCATE_SPECIALIZATIONS : mapped_to
+
+    ADVOCATES ||--o{ ADVOCATE_LANGUAGES : speaks
+    LANGUAGES ||--o{ ADVOCATE_LANGUAGES : mapped_to
+
+    ADVOCATES ||--o{ ADVOCATE_AVAILABILITY : offers
+
+    ADVOCATES ||--o{ ADVOCATE_PRICING : sets
+
+    ADVOCATES ||--o{ CONSULTATIONS : attends
+
+    CONSULTATIONS ||--|| PAYMENTS : has
