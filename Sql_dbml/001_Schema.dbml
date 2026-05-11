@@ -36,6 +36,9 @@ Table users {
   refresh_token            text         [null, note: 'Hashed refresh token — never store plain']
   refresh_token_expires_at timestamptz  [null, note: 'NULL = no active session']
 
+  // Profile
+  avatar_url               text         [null, note: 'Cloudinary URL — e.g. https://res.cloudinary.com/<cloud>/image/upload/v123/avatars/<user_id>.jpg']
+
   // Timestamps
   created_at               timestamptz  [not null, default: `now()`]
   updated_at               timestamptz  [not null, default: `now()`, note: 'Auto-updated by trigger']
