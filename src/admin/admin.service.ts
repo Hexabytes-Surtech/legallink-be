@@ -29,12 +29,17 @@ export class AdminService {
   }
 
   // ── Approve or reject an advocate ─────────────────────────────────────────
-  async verifyAdvocate(advocateId: string, action: 'approve' | 'reject', reason?: string) {
+  async verifyAdvocate(
+    advocateId: string,
+    action: 'approve' | 'reject',
+    reason?: string,
+  ) {
     const existing = await this.db.query(
       `SELECT id FROM advocates WHERE id = $1`,
       [advocateId],
     );
-    if (!existing.rows.length) throw new NotFoundException('Advocate not found');
+    if (!existing.rows.length)
+      throw new NotFoundException('Advocate not found');
 
     const newStatus = action === 'approve' ? 'verified' : 'rejected';
 

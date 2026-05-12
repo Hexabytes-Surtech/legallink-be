@@ -1,12 +1,12 @@
 import { Module } from '@nestjs/common';
-import { AdvocateController } from './advocate.controller';
-import { AdvocateService } from './advocate.service';
+import { UserController } from './user.controller';
+import { UserService } from './user.service';
 import { DatabaseModule } from '../database/database.module';
 import { CloudinaryModule } from '../cloudinary/cloudinary.module';
 
 @Module({
   imports: [DatabaseModule, CloudinaryModule],
-  controllers: [AdvocateController],
-  providers: [AdvocateService],
+  controllers: [UserController],
+  providers: [UserService],
 })
-export class AdvocateModule {}
+export class UserModule {}

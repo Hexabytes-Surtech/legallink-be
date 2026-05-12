@@ -1,8 +1,8 @@
 import { ApiProperty } from '@nestjs/swagger';
 
-export class RequestOtpDto {
+export class LoginDto {
   @ApiProperty({
-    description: 'The email address to send the OTP to',
+    description: 'The email address of the registered user',
     example: 'advocate@example.com',
   })
   email: string;
