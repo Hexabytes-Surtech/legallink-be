@@ -15,9 +15,9 @@ export class CloudinaryService {
     return new Promise((resolve, reject) => {
       const upload = cloudinary.uploader.upload_stream(
         {
-          folder,                      // stores file inside this folder
-          public_id: publicId,         // optional stable ID (e.g. userId for avatars)
-          resource_type: 'auto',       // handles images, PDFs, and other file types
+          folder, // stores file inside this folder
+          public_id: publicId, // optional stable ID (e.g. userId for avatars)
+          resource_type: 'auto', // handles images, PDFs, and other file types
         },
         (error, result) => {
           if (error) return reject(error);

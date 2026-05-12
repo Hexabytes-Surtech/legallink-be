@@ -22,8 +22,13 @@ export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
   @Get('pending')
-  @ApiOperation({ summary: 'List all advocates with pending verification (admin only)' })
-  @ApiResponse({ status: 200, description: 'Pending advocates returned with their documents' })
+  @ApiOperation({
+    summary: 'List all advocates with pending verification (admin only)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Pending advocates returned with their documents',
+  })
   @ApiResponse({ status: 403, description: 'Admin role required' })
   getPendingAdvocates() {
     return this.adminService.getPendingAdvocates();

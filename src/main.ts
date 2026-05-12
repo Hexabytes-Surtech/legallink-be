@@ -1,12 +1,16 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import cookieParser from 'cookie-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // All routes are prefixed with /api  (e.g. /api/auth/request-otp)
-  app.setGlobalPrefix('api/v1');
+  // Parse cookies — refresh token is read from req.cookies.refreshToken
+  app.use(cookieParser());
+
+  // All routes are prefixed with /api  (e.g. /api/auth/register)
+  app.setGlobalPrefix('api');
 
   const config = new DocumentBuilder()
     .setTitle('LegalLink API')
