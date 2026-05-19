@@ -25,18 +25,15 @@ export class IdentityService {
   }
 
   // ── API 1 — POST /api/auth/register ─────────────────────────────────────
-  async register(email: string, role: string, preferredLanguage = 'en') {
-    // Block admin self-registration
+  async register(email: string, role: string) {
     if (role === 'admin') {
       throw new BadRequestException('Admin role cannot be self-registered');
     }
 
-    // Validate role
     if (!['citizen', 'advocate'].includes(role)) {
       throw new BadRequestException('Role must be citizen or advocate');
     }
 
-    // Check if user already exists
     const existing = await this.db.query(
       `SELECT id, email_verified FROM users WHERE email = $1`,
       [email],
@@ -46,29 +43,25 @@ export class IdentityService {
       throw new ConflictException('Email already registered and verified');
     }
 
-    // Generate 6-digit OTP, hash it
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const otpHash = await bcrypt.hash(otp, 10);
-    const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     if (existing.rows.length > 0) {
-      // Existing unverified user — update OTP fields only
       await this.db.query(
         `UPDATE users
-         SET otp_code = $1, otp_expires_at = $2, role = $3, preferred_language = $4, updated_at = now()
-         WHERE email = $5`,
-        [otpHash, otpExpiresAt, role, preferredLanguage, email],
+         SET otp_code = $1, otp_expires_at = $2, role = $3, updated_at = now()
+         WHERE email = $4`,
+        [otpHash, otpExpiresAt, role, email],
       );
     } else {
-      // New user — INSERT
       await this.db.query(
-        `INSERT INTO users (email, role, preferred_language, otp_code, otp_expires_at, email_verified)
-         VALUES ($1, $2, $3, $4, $5, false)`,
-        [email, role, preferredLanguage, otpHash, otpExpiresAt],
+        `INSERT INTO users (email, role, otp_code, otp_expires_at, email_verified)
+         VALUES ($1, $2, $3, $4, false)`,
+        [email, role, otpHash, otpExpiresAt],
       );
     }
 
-    // Send OTP email via Resend
     await this.sendOtpEmail(email, otp);
 
     return { expiresInSeconds: 600 };

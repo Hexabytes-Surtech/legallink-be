@@ -42,11 +42,7 @@ export class IdentityController {
     description: 'Email already registered and verified',
   })
   register(@Body() dto: RegisterDto) {
-    return this.identityService.register(
-      dto.email,
-      dto.role,
-      dto.preferred_language,
-    );
+    return this.identityService.register(dto.email, dto.role);
   }
 
   // ── Login ───────────────────────────────────────────────────────────────
