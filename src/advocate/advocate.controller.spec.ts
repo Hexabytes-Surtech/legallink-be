@@ -14,6 +14,11 @@ describe('AdvocateController', () => {
       getDocuments: jest.fn(),
       updateProfile: jest.fn(),
       uploadDocument: jest.fn(),
+      getConsultations: jest.fn(),
+      getConsultationById: jest.fn(),
+      updateConsultation: jest.fn(),
+      getDashboard: jest.fn(),
+      submitVerification: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -128,6 +133,152 @@ describe('AdvocateController', () => {
 
       expect(result).toEqual(expectedResult);
       expect(service.uploadDocument).toHaveBeenCalledWith('user-123', mockFile);
+    });
+  });
+
+  describe('getDashboard', () => {
+    it('should return dashboard data', async () => {
+      const mockUser = {
+        sub: 'user-123',
+        role: 'advocate',
+        email: 'advocate@example.com',
+      };
+      const expectedData = {
+        advocateId: 'advocate-123',
+        verificationStatus: 'pending',
+        profileCompleteness: 75,
+        consultationStats: {
+          pending_count: '2',
+          accepted_count: '5',
+          declined_count: '1',
+          closed_count: '3',
+          total_count: '11',
+        },
+      };
+      service.getDashboard.mockResolvedValue(expectedData);
+
+      const result = await controller.getDashboard(mockUser);
+
+      expect(result).toEqual(expectedData);
+      expect(service.getDashboard).toHaveBeenCalledWith('user-123');
+    });
+  });
+
+  describe('getConsultations', () => {
+    it('should return list of consultations', async () => {
+      const mockUser = {
+        sub: 'user-123',
+        role: 'advocate',
+        email: 'advocate@example.com',
+      };
+      const expectedConsultations = [
+        {
+          id: 'cons-1',
+          status: 'requested',
+          requested_at: new Date(),
+          query_text: 'Legal question',
+        },
+      ];
+      service.getConsultations.mockResolvedValue(expectedConsultations);
+
+      const result = await controller.getConsultations(mockUser);
+
+      expect(result).toEqual(expectedConsultations);
+      expect(service.getConsultations).toHaveBeenCalledWith('user-123');
+    });
+  });
+
+  describe('getConsultationById', () => {
+    it('should return consultation detail', async () => {
+      const mockUser = {
+        sub: 'user-123',
+        role: 'advocate',
+        email: 'advocate@example.com',
+      };
+      const expectedConsultation = {
+        id: 'cons-1',
+        status: 'requested',
+        matter_id: 'matter-1',
+        query_text: 'Legal question',
+      };
+      service.getConsultationById.mockResolvedValue(expectedConsultation);
+
+      const result = await controller.getConsultationById(mockUser, 'cons-1');
+
+      expect(result).toEqual(expectedConsultation);
+      expect(service.getConsultationById).toHaveBeenCalledWith('user-123', 'cons-1');
+    });
+  });
+
+  describe('updateConsultation', () => {
+    it('should accept consultation', async () => {
+      const mockUser = {
+        sub: 'user-123',
+        role: 'advocate',
+        email: 'advocate@example.com',
+      };
+      const dto = { action: 'accept' as const };
+      const expectedResult = {
+        consultationId: 'cons-1',
+        status: 'accepted',
+      };
+      service.updateConsultation.mockResolvedValue(expectedResult);
+
+      const result = await controller.updateConsultation(mockUser, 'cons-1', dto);
+
+      expect(result).toEqual(expectedResult);
+      expect(service.updateConsultation).toHaveBeenCalledWith(
+        'user-123',
+        'cons-1',
+        'accept',
+        undefined,
+      );
+    });
+
+    it('should decline consultation with reason', async () => {
+      const mockUser = {
+        sub: 'user-123',
+        role: 'advocate',
+        email: 'advocate@example.com',
+      };
+      const dto = { action: 'decline' as const, declineReason: 'Schedule conflict' };
+      const expectedResult = {
+        consultationId: 'cons-1',
+        status: 'declined',
+        declineReason: 'Schedule conflict',
+      };
+      service.updateConsultation.mockResolvedValue(expectedResult);
+
+      const result = await controller.updateConsultation(mockUser, 'cons-1', dto);
+
+      expect(result).toEqual(expectedResult);
+      expect(service.updateConsultation).toHaveBeenCalledWith(
+        'user-123',
+        'cons-1',
+        'decline',
+        'Schedule conflict',
+      );
+    });
+  });
+
+  describe('submitVerification', () => {
+    it('should submit profile for verification', async () => {
+      const mockUser = {
+        sub: 'user-123',
+        role: 'advocate',
+        email: 'advocate@example.com',
+      };
+      const expectedResult = {
+        advocateId: 'advocate-123',
+        verificationStatus: 'pending',
+        message: 'Profile submitted for admin review',
+      };
+      service.submitVerification.mockResolvedValue(expectedResult);
+
+      const result = await controller.submitVerification(mockUser);
+
+      expect(result).toEqual(expectedResult);
+      expect(service.submitVerification).toHaveBeenCalledWith('user-123');
     });
   });
 });

@@ -37,7 +37,6 @@ describe('IdentityController', () => {
       const dto = {
         email: 'test@example.com',
         role: 'citizen',
-        preferred_language: 'en',
       };
       const result = await controller.register(dto);
 
@@ -45,7 +44,6 @@ describe('IdentityController', () => {
       expect(service.register).toHaveBeenCalledWith(
         'test@example.com',
         'citizen',
-        'en',
       );
     });
   });

@@ -1,12 +1,3 @@
-// =============================================================
-// Phase 1 Database Schema — Citizen Legal Aid Platform
-// All changes applied:
-//   - Email-only OTP (phone stored but not used for auth)
-//   - JWT refresh token columns on users
-//   - otp_type removed
-// Viewer: https://dbdiagram.io  (paste this file)
-// =============================================================
-
 Project CitizenLegalAid {
   database_type: 'PostgreSQL'
   Note: 'Phase 1 minimal schema — Neon PostgreSQL, raw SQL, no ORM'
@@ -21,8 +12,6 @@ Table users {
   // Identity
   email                    varchar(255) [not null, unique, note: 'Primary identity + OTP channel']
   email_verified           boolean      [not null, default: false]
-  phone                    varchar(20)  [null, note: 'Optional — stored for contact only, NOT used for auth']
-  phone_verified           boolean      [not null, default: false, note: 'Kept for future use']
 
   // Role & preferences
   role                     varchar(20)  [not null, note: 'citizen | advocate | admin']
@@ -45,7 +34,6 @@ Table users {
 
   indexes {
     email                  [unique, name: 'idx_users_email']
-    phone                  [name: 'idx_users_phone']
     role                   [name: 'idx_users_role']
     refresh_token          [name: 'idx_users_refresh_token']
   }
@@ -65,7 +53,6 @@ Table advocates {
   state_bar            varchar(100) [not null, note: 'e.g. West Bengal']
   name                 varchar(255) [not null, note: 'As per Certificate of Practice']
   address              text         [not null, note: 'As per Certificate of Practice']
-  phone                varchar(20)  [not null, note: 'As per Certificate of Practice']
   email                varchar(255) [null,     note: 'Optional — may not appear on CoP']
 
   // Array fields — use Postgres text[] with GIN indexes for fast matching

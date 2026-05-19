@@ -279,4 +279,279 @@ describe('AdvocateService', () => {
       expect(result.documentId).toBe('doc-id');
     });
   });
+
+  describe('getConsultations', () => {
+    it('should return list of consultations', async () => {
+      const mockConsultations = [
+        {
+          id: 'cons-1',
+          status: 'requested',
+          requested_at: new Date(),
+          accepted_at: null,
+          query_text: 'Legal question',
+          query_language: 'en',
+          classification: 'family',
+          citizen_user_id: 'citizen-1',
+        },
+      ];
+      db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
+      db.query.mockResolvedValueOnce({ rows: mockConsultations });
+
+      const result = await service.getConsultations('user-uuid-123');
+
+      expect(result).toEqual(mockConsultations);
+    });
+
+    it('should throw NotFoundException when advocate not found', async () => {
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      await expect(service.getConsultations('non-existent-user')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('getConsultationById', () => {
+    it('should return consultation detail', async () => {
+      const mockConsultation = {
+        id: 'cons-1',
+        status: 'requested',
+        requested_at: new Date(),
+        accepted_at: null,
+        matter_id: 'matter-1',
+        query_text: 'Legal question',
+        query_language: 'en',
+        classification: 'family',
+        citations: null,
+        ai_response_english: 'AI response',
+        ai_response_bengali: 'AI response bn',
+        citizen_user_id: 'citizen-1',
+      };
+      db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
+      db.query.mockResolvedValueOnce({ rows: [mockConsultation] });
+
+      const result = await service.getConsultationById('user-uuid-123', 'cons-1');
+
+      expect(result).toEqual(mockConsultation);
+    });
+
+    it('should throw NotFoundException when consultation not found', async () => {
+      db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      await expect(
+        service.getConsultationById('user-uuid-123', 'non-existent'),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('updateConsultation', () => {
+    it('should accept consultation', async () => {
+      const existingConsultation = {
+        id: 'cons-1',
+        status: 'requested',
+      };
+      db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
+      db.query.mockResolvedValueOnce({ rows: [existingConsultation] });
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      const result = await service.updateConsultation(
+        'user-uuid-123',
+        'cons-1',
+        'accept',
+      );
+
+      expect(result).toEqual({
+        consultationId: 'cons-1',
+        status: 'accepted',
+      });
+    });
+
+    it('should decline consultation with reason', async () => {
+      const existingConsultation = {
+        id: 'cons-1',
+        status: 'requested',
+      };
+      db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
+      db.query.mockResolvedValueOnce({ rows: [existingConsultation] });
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      const result = await service.updateConsultation(
+        'user-uuid-123',
+        'cons-1',
+        'decline',
+        'Schedule conflict',
+      );
+
+      expect(result).toEqual({
+        consultationId: 'cons-1',
+        status: 'declined',
+        declineReason: 'Schedule conflict',
+      });
+    });
+
+    it('should throw NotFoundException when consultation not found', async () => {
+      db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      await expect(
+        service.updateConsultation('user-uuid-123', 'non-existent', 'accept'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should throw BadRequestException when consultation not in requested state', async () => {
+      const existingConsultation = {
+        id: 'cons-1',
+        status: 'accepted',
+      };
+      db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
+      db.query.mockResolvedValueOnce({ rows: [existingConsultation] });
+
+      await expect(
+        service.updateConsultation('user-uuid-123', 'cons-1', 'accept'),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe('getDashboard', () => {
+    it('should return dashboard with stats', async () => {
+      const mockStats = {
+        pending_count: '2',
+        accepted_count: '5',
+        declined_count: '1',
+        closed_count: '3',
+        total_count: '11',
+      };
+      db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
+      db.query.mockResolvedValueOnce({ rows: [mockStats] });
+
+      const result = await service.getDashboard('user-uuid-123');
+
+      expect(result).toEqual({
+        advocateId: 'advocate-uuid-123',
+        verificationStatus: 'pending',
+        profileCompleteness: expect.any(Number),
+        consultationStats: mockStats,
+      });
+    });
+
+    it('should throw NotFoundException when advocate not found', async () => {
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      await expect(service.getDashboard('non-existent-user')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('submitVerification', () => {
+    it('should submit profile for verification', async () => {
+      const completeAdvocate = {
+        ...mockAdvocate,
+        bar_enrolment_number: 'WB/1234/2020',
+        state_bar: 'West Bengal',
+        name: 'John Doe',
+        address: '123 Main St',
+      };
+      db.query.mockResolvedValueOnce({ rows: [completeAdvocate] });
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      const result = await service.submitVerification('user-uuid-123');
+
+      expect(result).toEqual({
+        advocateId: 'advocate-uuid-123',
+        verificationStatus: 'pending',
+        message: 'Profile submitted for admin review',
+      });
+    });
+
+    it('should throw BadRequestException when already verified', async () => {
+      const verifiedAdvocate = {
+        ...mockAdvocate,
+        verification_status: 'verified',
+      };
+      db.query.mockResolvedValueOnce({ rows: [verifiedAdvocate] });
+
+      await expect(service.submitVerification('user-uuid-123')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('should throw BadRequestException when profile incomplete', async () => {
+      const incompleteAdvocate = {
+        ...mockAdvocate,
+        bar_enrolment_number: '',
+        state_bar: 'West Bengal',
+        name: 'John Doe',
+        address: '',
+      };
+      db.query.mockResolvedValueOnce({ rows: [incompleteAdvocate] });
+
+      await expect(service.submitVerification('user-uuid-123')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+  });
+
+  describe('calculateProfileCompleteness', () => {
+    it('should return 100% for complete profile', () => {
+      const completeAdvocate = {
+        bar_enrolment_number: 'WB/1234/2020',
+        state_bar: 'West Bengal',
+        name: 'John Doe',
+        address: '123 Main St',
+        practice_areas: ['family'],
+        courts: ['Calcutta HC'],
+        languages: ['en'],
+        districts: ['kolkata'],
+      };
+      const completeness = (service as any).calculateProfileCompleteness(completeAdvocate);
+      expect(completeness).toBe(100);
+    });
+
+    it('should return 0% for empty profile', () => {
+      const emptyAdvocate = {
+        bar_enrolment_number: '',
+        state_bar: '',
+        name: '',
+        address: '',
+        practice_areas: [],
+        courts: [],
+        languages: [],
+        districts: [],
+      };
+      const completeness = (service as any).calculateProfileCompleteness(emptyAdvocate);
+      expect(completeness).toBe(0);
+    });
+
+    it('should return 25% for partially complete profile (2 of 8 fields)', () => {
+      const halfAdvocate = {
+        bar_enrolment_number: 'WB/1234/2020',
+        state_bar: 'West Bengal',
+        name: '',
+        address: '',
+        practice_areas: [],
+        courts: [],
+        languages: [],
+        districts: [],
+      };
+      const completeness = (service as any).calculateProfileCompleteness(halfAdvocate);
+      expect(completeness).toBe(25);
+    });
+
+    it('should return 50% for half complete profile (4 of 8 fields)', () => {
+      const halfAdvocate = {
+        bar_enrolment_number: 'WB/1234/2020',
+        state_bar: 'West Bengal',
+        name: 'John Doe',
+        address: '123 Main St',
+        practice_areas: [],
+        courts: [],
+        languages: [],
+        districts: [],
+      };
+      const completeness = (service as any).calculateProfileCompleteness(halfAdvocate);
+      expect(completeness).toBe(50);
+    });
+  });
 });

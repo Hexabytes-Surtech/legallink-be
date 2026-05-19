@@ -4,6 +4,8 @@ import {
   Put,
   Post,
   Body,
+  Param,
+  HttpCode,
   UseGuards,
   UseInterceptors,
   UploadedFile,
@@ -24,6 +26,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { JwtPayload } from '../common/decorators/current-user.decorator';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { ConsultationActionDto } from './dto/consultation-action.dto';
 
 @ApiTags('Advocate')
 @ApiBearerAuth()
@@ -98,5 +101,48 @@ export class AdvocateController {
     @UploadedFile() file: Express.Multer.File,
   ) {
     return this.advocateService.uploadDocument(user.sub, file);
+  }
+
+  @Get('dashboard')
+  @ApiOperation({ summary: 'Dashboard: stats + profile completeness' })
+  @ApiResponse({ status: 200, description: 'Dashboard data' })
+  getDashboard(@CurrentUser() user: JwtPayload) {
+    return this.advocateService.getDashboard(user.sub);
+  }
+
+  @Get('consultations')
+  @ApiOperation({ summary: 'List all incoming consultations' })
+  @ApiResponse({ status: 200, description: 'Array of consultation objects' })
+  getConsultations(@CurrentUser() user: JwtPayload) {
+    return this.advocateService.getConsultations(user.sub);
+  }
+
+  @Get('consultations/:id')
+  @ApiOperation({ summary: 'Get single consultation detail' })
+  @ApiResponse({ status: 200, description: 'Full consultation with matter info' })
+  @ApiResponse({ status: 404, description: 'Consultation not found' })
+  getConsultationById(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.advocateService.getConsultationById(user.sub, id);
+  }
+
+  @Put('consultations/:id')
+  @ApiOperation({ summary: 'Accept or decline a consultation' })
+  @ApiBody({ type: ConsultationActionDto })
+  @ApiResponse({ status: 200, description: 'Status updated' })
+  updateConsultation(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: ConsultationActionDto,
+  ) {
+    return this.advocateService.updateConsultation(user.sub, id, dto.action, dto.declineReason);
+  }
+
+  @Post('submit-verification')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Submit profile for admin verification' })
+  @ApiResponse({ status: 200, description: 'Submitted for review' })
+  @ApiResponse({ status: 400, description: 'Profile incomplete or already verified' })
+  submitVerification(@CurrentUser() user: JwtPayload) {
+    return this.advocateService.submitVerification(user.sub);
   }
 }

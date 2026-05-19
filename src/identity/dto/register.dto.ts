@@ -13,11 +13,4 @@ export class RegisterDto {
     example: 'advocate',
   })
   role: 'citizen' | 'advocate';
-
-  @ApiProperty({
-    description: 'Preferred language (optional, defaults to en)',
-    example: 'en',
-    required: false,
-  })
-  preferred_language?: string;
 }

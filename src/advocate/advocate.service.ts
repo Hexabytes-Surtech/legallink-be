@@ -127,6 +127,113 @@ export class AdvocateService {
     };
   }
 
+  async getConsultations(userId: string) {
+    const advocate = await this.getAdvocateByUserId(userId);
+    const result = await this.db.query(
+      `SELECT c.id, c.status, c.requested_at, c.accepted_at,
+              m.query_text, m.query_language, m.classification,
+              u.id AS citizen_user_id
+       FROM consultations c
+       JOIN matters m ON m.id = c.matter_id
+       JOIN users u ON u.id = c.citizen_id
+       WHERE c.advocate_id = $1
+       ORDER BY c.requested_at DESC`,
+      [advocate.id],
+    );
+    return result.rows;
+  }
+
+  async getConsultationById(userId: string, consultationId: string) {
+    const advocate = await this.getAdvocateByUserId(userId);
+    const result = await this.db.query(
+      `SELECT c.id, c.status, c.requested_at, c.accepted_at,
+              m.id AS matter_id, m.query_text, m.query_language,
+              m.classification, m.citations,
+              m.ai_response_english, m.ai_response_bengali,
+              u.id AS citizen_user_id
+       FROM consultations c
+       JOIN matters m ON m.id = c.matter_id
+       JOIN users u ON u.id = c.citizen_id
+       WHERE c.id = $1 AND c.advocate_id = $2`,
+      [consultationId, advocate.id],
+    );
+    if (!result.rows.length) throw new NotFoundException('Consultation not found');
+    return result.rows[0];
+  }
+
+  async updateConsultation(
+    userId: string,
+    consultationId: string,
+    action: 'accept' | 'decline',
+    declineReason?: string,
+  ) {
+    const advocate = await this.getAdvocateByUserId(userId);
+    const existing = await this.db.query(
+      `SELECT id, status FROM consultations WHERE id = $1 AND advocate_id = $2`,
+      [consultationId, advocate.id],
+    );
+    if (!existing.rows.length) throw new NotFoundException('Consultation not found');
+    if (existing.rows[0].status !== 'requested')
+      throw new BadRequestException('Consultation is not in requested state');
+
+    const newStatus = action === 'accept' ? 'accepted' : 'declined';
+    await this.db.query(
+      `UPDATE consultations
+       SET status = $1, accepted_at = ${action === 'accept' ? 'NOW()' : 'NULL'}
+       WHERE id = $2`,
+      [newStatus, consultationId],
+    );
+    return { consultationId, status: newStatus, ...(declineReason && { declineReason }) };
+  }
+
+  async getDashboard(userId: string) {
+    const advocate = await this.getAdvocateByUserId(userId);
+    const stats = await this.db.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'requested') AS pending_count,
+         COUNT(*) FILTER (WHERE status = 'accepted')  AS accepted_count,
+         COUNT(*) FILTER (WHERE status = 'declined')  AS declined_count,
+         COUNT(*) FILTER (WHERE status = 'closed')    AS closed_count,
+         COUNT(*)                                      AS total_count
+       FROM consultations WHERE advocate_id = $1`,
+      [advocate.id],
+    );
+    return {
+      advocateId: advocate.id,
+      verificationStatus: advocate.verification_status,
+      profileCompleteness: this.calculateProfileCompleteness(advocate),
+      consultationStats: stats.rows[0],
+    };
+  }
+
+  async submitVerification(userId: string) {
+    const advocate = await this.getAdvocateByUserId(userId);
+    if (advocate.verification_status === 'verified')
+      throw new BadRequestException('Already verified');
+    if (!advocate.bar_enrolment_number || !advocate.state_bar || !advocate.name || !advocate.address)
+      throw new BadRequestException('Complete your profile before submitting for verification');
+    return {
+      advocateId: advocate.id,
+      verificationStatus: advocate.verification_status,
+      message: 'Profile submitted for admin review',
+    };
+  }
+
+  private calculateProfileCompleteness(advocate: any): number {
+    const fields = [
+      advocate.bar_enrolment_number,
+      advocate.state_bar,
+      advocate.name,
+      advocate.address,
+      advocate.practice_areas?.length > 0,
+      advocate.courts?.length > 0,
+      advocate.languages?.length > 0,
+      advocate.districts?.length > 0,
+    ];
+    const filled = fields.filter(Boolean).length;
+    return Math.round((filled / fields.length) * 100);
+  }
+
   // ── Private Helpers ───────────────────────────────────────────────────
 
   private async getAdvocateByUserId(userId: string) {

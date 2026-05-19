@@ -93,7 +93,7 @@ describe('IdentityService', () => {
       db.query.mockResolvedValueOnce({ rows: [] });
       db.query.mockResolvedValueOnce({ rows: [] });
 
-      const result = await service.register('new@example.com', 'citizen', 'en');
+      const result = await service.register('new@example.com', 'citizen');
 
       expect(result).toEqual({ expiresInSeconds: 600 });
       expect(db.query).toHaveBeenCalledTimes(2);
@@ -116,11 +116,7 @@ describe('IdentityService', () => {
       });
       db.query.mockResolvedValueOnce({ rows: [] });
 
-      const result = await service.register(
-        'existing@example.com',
-        'citizen',
-        'en',
-      );
+      const result = await service.register('existing@example.com', 'citizen');
 
       expect(result).toEqual({ expiresInSeconds: 600 });
       expect(db.query).toHaveBeenNthCalledWith(
@@ -136,19 +132,19 @@ describe('IdentityService', () => {
       });
 
       await expect(
-        service.register('verified@example.com', 'citizen', 'en'),
+        service.register('verified@example.com', 'citizen'),
       ).rejects.toThrow(ConflictException);
     });
 
     it('should throw BadRequestException for admin role', async () => {
       await expect(
-        service.register('admin@example.com', 'admin', 'en'),
+        service.register('admin@example.com', 'admin'),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('should throw BadRequestException for invalid role', async () => {
       await expect(
-        service.register('user@example.com', 'invalid', 'en'),
+        service.register('user@example.com', 'invalid'),
       ).rejects.toThrow(BadRequestException);
     });
   });
