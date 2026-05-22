@@ -136,8 +136,8 @@ export class IdentityService {
       if (!existingAdvocate.rows.length) {
         await this.db.query(
           `INSERT INTO advocates (user_id, bar_enrolment_number, state_bar, name, address, phone, verification_status)
-           VALUES ($1, '', '', '', '', '', 'pending')`,
-          [user.id],
+           VALUES ($1, $2, '', '', '', '', 'pending')`,
+          [user.id, `temp_${user.id}`],
         );
       }
     }

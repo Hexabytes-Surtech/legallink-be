@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS users (
 
     -- ── OTP (shared for both phone & email flows) ──────────────
     -- otp_type tells you WHICH channel this pending OTP belongs to
-    otp_code                 VARCHAR(6),                           -- current hashed/plain 6-digit OTP
+    otp_code                 VARCHAR(255),                         -- current hashed/plain 6-digit OTP (bcrypt hashed)
     otp_expires_at           TIMESTAMPTZ,                          -- NULL when no OTP is pending
     otp_type                 VARCHAR(10)
                                  CHECK (otp_type IN ('phone', 'email')),  -- which channel sent the OTP
