@@ -11,6 +11,12 @@ import { IdentityModule } from './identity/identity.module';
 import { UserModule } from './user/user.module';
 import { AdvocateModule } from './advocate/advocate.module';
 import { AdminModule } from './admin/admin.module';
+import { AiModule } from './ai/ai.module';
+import { MatchingModule } from './matching/matching.module';
+import { MatterModule } from './matter/matter.module';
+import { ConsultationModule } from './consultation/consultation.module';
+import { ConversationModule } from './conversation/conversation.module';
+import { ModerationModule } from './moderation/moderation.module';
 
 import { ResponseEnvelopeInterceptor } from './common/interceptors/response-envelope.interceptor';
 
@@ -26,11 +32,16 @@ import { ResponseEnvelopeInterceptor } from './common/interceptors/response-enve
     UserModule,
     AdvocateModule,
     AdminModule,
+    AiModule,
+    MatchingModule,
+    MatterModule,
+    ConsultationModule,
+    ConversationModule,
+    ModerationModule,
   ],
   controllers: [AppController],
   providers: [
     AppService,
-    // Applies { success, data, meta } envelope to ALL responses globally
     {
       provide: APP_INTERCEPTOR,
       useClass: ResponseEnvelopeInterceptor,

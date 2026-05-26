@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 
 @Injectable()
@@ -19,7 +20,7 @@ export class AdminService {
                 '[]'
               ) AS documents
        FROM advocates a
-       JOIN users u ON u.id = a.user_id
+       LEFT JOIN users u ON u.id = a.user_id
        LEFT JOIN advocate_verification_documents d ON d.advocate_id = a.id
        WHERE a.verification_status = 'pending'
        GROUP BY a.id, u.email
@@ -53,5 +54,51 @@ export class AdminService {
       verificationStatus: newStatus,
       ...(reason && { reason }),
     };
+  }
+
+  // ── List flagged messages ──────────────────────────────────────────────────
+  async getFlaggedMessages() {
+    const result = await this.db.query(
+      `SELECT cm.message_id AS "messageId",
+              cm.request_id AS "consultationId",
+              cm.matter_id  AS "matterId",
+              cm.sender_type AS "senderType",
+              cm.sender_id  AS "senderId",
+              cm.content,
+              cm.moderation_status AS "moderationStatus",
+              cm.moderation_flags AS "moderationFlags",
+              cm.created_at AS "createdAt"
+       FROM conversation_message cm
+       WHERE cm.moderation_status = 'flagged'
+       ORDER BY cm.created_at DESC`,
+    );
+    return result.rows;
+  }
+
+  // ── Approve or dismiss a flagged message ──────────────────────────────────
+  async updateMessageStatus(
+    messageId: string,
+    action: 'approve' | 'dismiss',
+  ) {
+    const existing = await this.db.query(
+      `SELECT message_id FROM conversation_message WHERE message_id = $1`,
+      [messageId],
+    );
+    if (!existing.rows.length)
+      throw new NotFoundException('Message not found');
+
+    const newStatus = action === 'approve' ? 'cleared' : 'cleared';
+    // Both approve and dismiss result in 'cleared' — the difference is intent.
+    // 'approve' = content is fine, broadcast was wrong; 'dismiss' = rule violation noted but no action needed.
+    // Either way the message leaves the flagged queue. We store the action in a note if needed.
+
+    await this.db.query(
+      `UPDATE conversation_message
+       SET moderation_status = $1
+       WHERE message_id = $2`,
+      [newStatus, messageId],
+    );
+
+    return { messageId, moderationStatus: newStatus, action };
   }
 }

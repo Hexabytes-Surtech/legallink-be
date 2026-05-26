@@ -22,9 +22,13 @@ export class UserService {
     const params: any[] = [];
     let paramIndex = 1;
 
-    if (dto.phone !== undefined) {
-      setClauses.push(`phone = $${paramIndex++}`);
-      params.push(dto.phone);
+    if (dto.name !== undefined) {
+      setClauses.push(`name = $${paramIndex++}`);
+      params.push(dto.name);
+    }
+    if (dto.address !== undefined) {
+      setClauses.push(`address = $${paramIndex++}`);
+      params.push(dto.address);
     }
     if (dto.preferred_language !== undefined) {
       setClauses.push(`preferred_language = $${paramIndex++}`);
@@ -66,7 +70,7 @@ export class UserService {
   // ── Private: return user without sensitive fields ─────────────────────
   private async getSafeUser(userId: string) {
     const result = await this.db.query(
-      `SELECT id, email, email_verified, role, phone, preferred_language, avatar_url, created_at, updated_at
+      `SELECT id, email, email_verified, role, name, address, preferred_language, avatar_url, created_at, updated_at
        FROM users WHERE id = $1`,
       [userId],
     );

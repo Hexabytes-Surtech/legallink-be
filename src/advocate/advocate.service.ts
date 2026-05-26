@@ -130,14 +130,15 @@ export class AdvocateService {
   async getConsultations(userId: string) {
     const advocate = await this.getAdvocateByUserId(userId);
     const result = await this.db.query(
-      `SELECT c.id, c.status, c.requested_at, c.accepted_at,
-              m.query_text, m.query_language, m.classification,
-              u.id AS citizen_user_id
-       FROM consultations c
-       JOIN matters m ON m.id = c.matter_id
-       JOIN users u ON u.id = c.citizen_id
-       WHERE c.advocate_id = $1
-       ORDER BY c.requested_at DESC`,
+      `SELECT cr.request_id AS id, cr.status, cr.created_at AS requested_at, cr.updated_at,
+              cr.citizen_note, cr.advocate_note,
+              m.matter_id, m.intake_text AS query_text, m.intake_language AS query_language,
+              m.classification_json AS classification,
+              cr.citizen_id AS citizen_user_id
+       FROM consultation_request cr
+       JOIN matter m ON m.matter_id = cr.matter_id
+       WHERE cr.advocate_id = $1
+       ORDER BY cr.created_at DESC`,
       [advocate.id],
     );
     return result.rows;
@@ -146,15 +147,18 @@ export class AdvocateService {
   async getConsultationById(userId: string, consultationId: string) {
     const advocate = await this.getAdvocateByUserId(userId);
     const result = await this.db.query(
-      `SELECT c.id, c.status, c.requested_at, c.accepted_at,
-              m.id AS matter_id, m.query_text, m.query_language,
-              m.classification, m.citations,
-              m.ai_response_english, m.ai_response_bengali,
-              u.id AS citizen_user_id
-       FROM consultations c
-       JOIN matters m ON m.id = c.matter_id
-       JOIN users u ON u.id = c.citizen_id
-       WHERE c.id = $1 AND c.advocate_id = $2`,
+      `SELECT cr.request_id AS id, cr.status, cr.created_at AS requested_at, cr.updated_at,
+              cr.citizen_note, cr.advocate_note,
+              m.matter_id, m.intake_text AS query_text, m.intake_language AS query_language,
+              m.classification_json AS classification,
+              mbv.brief_json,
+              cr.citizen_id AS citizen_user_id
+       FROM consultation_request cr
+       JOIN matter m ON m.matter_id = cr.matter_id
+       LEFT JOIN matter_brief_version mbv ON mbv.matter_id = m.matter_id
+       WHERE cr.request_id = $1 AND cr.advocate_id = $2
+       ORDER BY mbv.generated_at DESC
+       LIMIT 1`,
       [consultationId, advocate.id],
     );
     if (!result.rows.length) throw new NotFoundException('Consultation not found');
@@ -169,19 +173,21 @@ export class AdvocateService {
   ) {
     const advocate = await this.getAdvocateByUserId(userId);
     const existing = await this.db.query(
-      `SELECT id, status FROM consultations WHERE id = $1 AND advocate_id = $2`,
+      `SELECT request_id, status FROM consultation_request
+       WHERE request_id = $1 AND advocate_id = $2`,
       [consultationId, advocate.id],
     );
     if (!existing.rows.length) throw new NotFoundException('Consultation not found');
-    if (existing.rows[0].status !== 'requested')
-      throw new BadRequestException('Consultation is not in requested state');
+    if (existing.rows[0].status !== 'pending')
+      throw new BadRequestException('Consultation is not in pending state');
 
     const newStatus = action === 'accept' ? 'accepted' : 'declined';
+    const advocateNote = declineReason ?? null;
     await this.db.query(
-      `UPDATE consultations
-       SET status = $1, accepted_at = ${action === 'accept' ? 'NOW()' : 'NULL'}
-       WHERE id = $2`,
-      [newStatus, consultationId],
+      `UPDATE consultation_request
+       SET status = $1, advocate_note = $2, updated_at = NOW()
+       WHERE request_id = $3`,
+      [newStatus, advocateNote, consultationId],
     );
     return { consultationId, status: newStatus, ...(declineReason && { declineReason }) };
   }
@@ -190,12 +196,12 @@ export class AdvocateService {
     const advocate = await this.getAdvocateByUserId(userId);
     const stats = await this.db.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'requested') AS pending_count,
+         COUNT(*) FILTER (WHERE status = 'pending')   AS pending_count,
          COUNT(*) FILTER (WHERE status = 'accepted')  AS accepted_count,
          COUNT(*) FILTER (WHERE status = 'declined')  AS declined_count,
          COUNT(*) FILTER (WHERE status = 'closed')    AS closed_count,
          COUNT(*)                                      AS total_count
-       FROM consultations WHERE advocate_id = $1`,
+       FROM consultation_request WHERE advocate_id = $1`,
       [advocate.id],
     );
     return {
