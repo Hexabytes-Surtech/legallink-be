@@ -1,17 +1,12 @@
 import { ApiProperty } from '@nestjs/swagger';
 
 export class UpdateUserProfileDto {
-  @ApiProperty({
-    description: 'Phone number (optional update)',
-    example: '+919876543210',
-    required: false,
-  })
-  phone?: string;
+  @ApiProperty({ example: 'Parambrata Ghosh', required: false })
+  name?: string;
 
-  @ApiProperty({
-    description: 'Preferred language (optional update)',
-    example: 'en',
-    required: false,
-  })
+  @ApiProperty({ example: '12 Park Street, Kolkata 700016', required: false })
+  address?: string;
+
+  @ApiProperty({ example: 'bn', enum: ['bn', 'en'], required: false })
   preferred_language?: string;
 }
