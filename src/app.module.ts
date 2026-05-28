@@ -1,6 +1,7 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_INTERCEPTOR } from '@nestjs/core';
+import { SessionMiddleware } from './common/session/session.middleware';
 
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -48,4 +49,8 @@ import { ResponseEnvelopeInterceptor } from './common/interceptors/response-enve
     },
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(SessionMiddleware).forRoutes('*');
+  }
+}

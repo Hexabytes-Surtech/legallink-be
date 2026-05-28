@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DatabaseService } from '../database/database.service';
+import { GeminiAiService } from './gemini-ai.service';
 
 export interface AiClassification {
   matterType: string;
@@ -75,22 +76,48 @@ export class AiService {
   constructor(
     private db: DatabaseService,
     private config: ConfigService,
+    private gemini: GeminiAiService,
   ) {
-    this.aiServiceUrl = this.config.get<string>('AI_SERVICE_URL');
+    this.aiServiceUrl = this.config.get<string>('AI_SERVICE_URL')?.trim() || undefined;
   }
 
   // Called by MatterService after creating the matter row.
-  // Tries real AI service first; falls back to mock.
+  // Dispatch order: Gemini → external AI service (AI_SERVICE_URL) → mock.
+  // Each fallback logs WHY it triggered (fixes silent-AI-failure bug C1).
   async processMatter(matterId: string, queryText: string, language: string): Promise<void> {
+    if (this.gemini.isAvailable()) {
+      try {
+        await this.gemini.processMatter(matterId, queryText, language);
+        return;
+      } catch (err) {
+        this.logger.warn(
+          `Gemini failed for matter=${matterId} (${(err as Error).message}); falling back`,
+        );
+      }
+    }
+
     if (this.aiServiceUrl) {
       try {
         await this.callRealAiService(matterId, queryText, language);
         return;
       } catch (err) {
-        this.logger.warn(`Real AI service unreachable (${err.message}); using mock`);
+        this.logger.warn(
+          `External AI service unreachable for matter=${matterId} (${(err as Error).message}); falling back to mock`,
+        );
       }
     }
-    await this.runMock(matterId, queryText, language);
+
+    try {
+      await this.runMock(matterId, queryText, language);
+      this.logger.log(`Mock AI brief generated for matter=${matterId}`);
+    } catch (err) {
+      // Last resort failed — re-throw so callers see something, instead of swallowing.
+      this.logger.error(
+        `All AI pipelines failed for matter=${matterId}: ${(err as Error).message}`,
+        (err as Error).stack,
+      );
+      throw err;
+    }
   }
 
   // ── Mock implementation ───────────────────────────────────────────────────
@@ -180,14 +207,19 @@ export class AiService {
       [matterId, language === 'bn' ? 'bn' : 'en', JSON.stringify(briefJson), units.length > 0],
     );
 
-    // Insert matter_citation rows
+    // Insert matter_citation rows — best-effort (FK target legal_document_unit may not
+    // contain the IDs we read from legal_unit; brief_json carries the citation text anyway).
     for (const unit of units) {
-      await this.db.query(
-        `INSERT INTO matter_citation (matter_id, unit_id, relevance_score, retrieval_method)
-         VALUES ($1, $2, $3, 'keyword')
-         ON CONFLICT DO NOTHING`,
-        [matterId, unit.unit_id, 0.80],
-      );
+      try {
+        await this.db.query(
+          `INSERT INTO matter_citation (matter_id, unit_id, relevance_score, retrieval_method)
+           VALUES ($1, $2, $3, 'keyword')
+           ON CONFLICT DO NOTHING`,
+          [matterId, unit.unit_id, 0.80],
+        );
+      } catch (err) {
+        this.logger.warn(`Mock citation insert skipped (${(err as Error).message.slice(0, 80)})`);
+      }
     }
 
     // Mark brief generated

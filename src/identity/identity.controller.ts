@@ -73,8 +73,9 @@ export class IdentityController {
   async verifyOtp(
     @Body() dto: VerifyOtpDto,
     @Res({ passthrough: true }) res: Response,
+    @Req() req: Request,
   ) {
-    return this.identityService.verifyOtp(dto.email, dto.otp, res);
+    return this.identityService.verifyOtp(dto.email, dto.otp, res, req);
   }
 
   // ── API 3 — Logout ─────────────────────────────────────────────────────

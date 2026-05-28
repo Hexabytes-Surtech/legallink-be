@@ -8,12 +8,25 @@ import {
 import { DatabaseService } from '../database/database.service';
 import { CreateConsultationDto } from './dto/create-consultation.dto';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 @Injectable()
 export class ConsultationService {
   constructor(private db: DatabaseService) {}
 
   // ── POST /api/consultations ───────────────────────────────────────────────
   async requestConsultation(dto: CreateConsultationDto, citizenUserId: string) {
+    // Input validation — bail on bad UUIDs with 400, not a 500 from PG.
+    if (!dto?.matterId || !UUID_RE.test(dto.matterId)) {
+      throw new BadRequestException('MATTER_ID_INVALID');
+    }
+    if (!dto?.advocateId || !UUID_RE.test(dto.advocateId)) {
+      throw new BadRequestException('ADVOCATE_ID_INVALID');
+    }
+    if (dto.citizenNote && dto.citizenNote.length > 1000) {
+      throw new BadRequestException('CITIZEN_NOTE_TOO_LONG');
+    }
+
     // Verify matter exists and belongs to this citizen
     const matterResult = await this.db.query(
       `SELECT matter_id, citizen_id, status FROM matter WHERE matter_id = $1`,
@@ -44,24 +57,26 @@ export class ConsultationService {
     );
     if (existing.rows.length) throw new ConflictException('CONSULTATION_ALREADY_EXISTS');
 
-    // Create the consultation request (using advocates.id as advocate_id)
-    const result = await this.db.query(
-      `INSERT INTO consultation_request
-         (matter_id, advocate_id, citizen_id, status, citizen_note)
-       VALUES ($1, $2, $3, 'pending', $4)
-       RETURNING request_id, status, matter_id, advocate_id, citizen_id, created_at`,
-      [dto.matterId, dto.advocateId, citizenUserId, dto.citizenNote ?? null],
-    );
-
-    // Stamp citizen_id on the matter if not already set
-    if (!matter.citizen_id) {
-      await this.db.query(
-        `UPDATE matter SET citizen_id = $1 WHERE matter_id = $2`,
-        [citizenUserId, dto.matterId],
+    // Atomically create the consultation row AND claim the matter to this citizen.
+    // Pre-fix, these were two separate statements — a failure between them left the
+    // matter orphaned (anonymous) while a consultation pointed at it.
+    const row = await this.db.withTransaction(async (q) => {
+      const ins = await q(
+        `INSERT INTO consultation_request
+           (matter_id, advocate_id, citizen_id, status, citizen_note)
+         VALUES ($1, $2, $3, 'pending', $4)
+         RETURNING request_id, status, matter_id, advocate_id, citizen_id, created_at`,
+        [dto.matterId, dto.advocateId, citizenUserId, dto.citizenNote ?? null],
       );
-    }
+      if (!matter.citizen_id) {
+        await q(
+          `UPDATE matter SET citizen_id = $1 WHERE matter_id = $2`,
+          [citizenUserId, dto.matterId],
+        );
+      }
+      return ins.rows[0];
+    });
 
-    const row = result.rows[0];
     return {
       consultationId: row.request_id,
       status: row.status,
