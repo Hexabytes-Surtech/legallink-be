@@ -87,10 +87,9 @@ export class AdminService {
     if (!existing.rows.length)
       throw new NotFoundException('Message not found');
 
-    const newStatus = action === 'approve' ? 'cleared' : 'cleared';
-    // Both approve and dismiss result in 'cleared' — the difference is intent.
-    // 'approve' = content is fine, broadcast was wrong; 'dismiss' = rule violation noted but no action needed.
-    // Either way the message leaves the flagged queue. We store the action in a note if needed.
+    // approve = admin confirms content is fine → 'cleared' (message becomes visible)
+    // dismiss = admin confirms rule36 violation → 'dismissed' (message stays hidden)
+    const newStatus = action === 'approve' ? 'cleared' : 'dismissed';
 
     await this.db.query(
       `UPDATE conversation_message

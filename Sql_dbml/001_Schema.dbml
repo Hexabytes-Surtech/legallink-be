@@ -178,7 +178,7 @@ Table messages {
   sender_type       varchar(10) [not null, note: 'citizen | advocate']
   sender_id         uuid        [not null, note: 'users.id of the sender']
   content           text        [not null]
-  moderation_status varchar(15) [not null, default: 'approved', note: 'approved | pending | flagged']
+  moderation_status varchar(15) [not null, default: 'pending', note: 'pending | approved | flagged — must default to pending so Rule 36 moderation hook can review before broadcast']
   created_at        timestamptz [not null, default: `now()`]
 
   indexes {

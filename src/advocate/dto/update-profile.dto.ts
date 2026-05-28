@@ -66,4 +66,11 @@ export class UpdateProfileDto {
     required: false,
   })
   districts?: string[];
+
+  @ApiProperty({
+    description: 'Short professional bio shown on public profile',
+    example: 'Specialising in tenancy and property disputes with 6 years of practice at Calcutta High Court.',
+    required: false,
+  })
+  bio?: string;
 }

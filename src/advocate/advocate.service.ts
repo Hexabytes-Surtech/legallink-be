@@ -7,6 +7,7 @@ import { DatabaseService } from '../database/database.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { AdvocatesQueryDto } from './dto/advocates-query.dto';
 
 @Injectable()
 export class AdvocateService {
@@ -60,6 +61,7 @@ export class AdvocateService {
       address: dto.address,
       phone: dto.phone,
       email: dto.email,
+      bio: dto.bio,
       bar_enrolment_number: dto.barEnrolmentNumber,
       state_bar: dto.stateBar,
       practice_areas: dto.practiceAreas,
@@ -238,6 +240,74 @@ export class AdvocateService {
     ];
     const filled = fields.filter(Boolean).length;
     return Math.round((filled / fields.length) * 100);
+  }
+
+  // ── Public Directory (no auth) ────────────────────────────────────────
+
+  async getPublicList(query: AdvocatesQueryDto) {
+    const page = Math.max(1, parseInt(query.page as string) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(query.limit as string) || 10));
+    const offset = (page - 1) * limit;
+    const verifiedOnly = query.verifiedOnly !== 'false';
+
+    // Normalise single string → array for array filter params
+    const practiceAreas = query.practiceArea
+      ? (Array.isArray(query.practiceArea) ? query.practiceArea : [query.practiceArea])
+      : null;
+    const languages = query.language
+      ? (Array.isArray(query.language) ? query.language : [query.language])
+      : null;
+    const district = query.district ?? null;
+
+    const filterParams = [verifiedOnly, practiceAreas, languages, district];
+
+    const rows = await this.db.query(
+      `SELECT a.id, a.name, a.bio, a.practice_areas, a.languages, a.districts,
+              a.state_bar, a.verification_status, u.avatar_url
+       FROM advocates a
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE ($1 = false OR a.verification_status = 'verified')
+         AND ($2::text[] IS NULL OR a.practice_areas && $2::text[])
+         AND ($3::text[] IS NULL OR a.languages && $3::text[])
+         AND ($4::text IS NULL OR $4 = ANY(a.districts))
+       ORDER BY (a.verification_status = 'verified') DESC, a.name ASC
+       LIMIT $5 OFFSET $6`,
+      [...filterParams, limit, offset],
+    );
+
+    const countResult = await this.db.query(
+      `SELECT COUNT(*)::int AS total
+       FROM advocates a
+       WHERE ($1 = false OR a.verification_status = 'verified')
+         AND ($2::text[] IS NULL OR a.practice_areas && $2::text[])
+         AND ($3::text[] IS NULL OR a.languages && $3::text[])
+         AND ($4::text IS NULL OR $4 = ANY(a.districts))`,
+      filterParams,
+    );
+
+    const total: number = countResult.rows[0].total;
+    return {
+      advocates: rows.rows,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+    };
+  }
+
+  async getPublicById(id: string) {
+    const result = await this.db.query(
+      `SELECT a.id, a.name, a.bio, a.practice_areas, a.languages, a.districts,
+              a.state_bar, a.verification_status, a.courts, a.bar_enrolment_number,
+              u.avatar_url
+       FROM advocates a
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.id = $1`,
+      [id],
+    );
+    if (!result.rows.length) {
+      throw new NotFoundException('Advocate not found');
+    }
+    return result.rows[0];
   }
 
   // ── Private Helpers ───────────────────────────────────────────────────

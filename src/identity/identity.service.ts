@@ -99,7 +99,7 @@ export class IdentityService {
   }
 
   // ── API 2 — POST /api/auth/verify-otp ───────────────────────────────────
-  async verifyOtp(email: string, otp: string, res: any) {
+  async verifyOtp(email: string, otp: string, res: any, req?: any) {
     const result = await this.db.query(
       `SELECT id, role, preferred_language, otp_code, otp_expires_at FROM users WHERE email = $1`,
       [email],
@@ -148,6 +148,25 @@ export class IdentityService {
          ON CONFLICT (user_id) DO NOTHING`,
         [user.id],
       );
+
+      // Claim-on-OTP-verify: any anonymous matters tied to this browser's
+      // session cookie are reassigned to the freshly-authenticated user.
+      const sessionId: string | undefined = req?.anonymousSessionId;
+      if (sessionId) {
+        const claim = await this.db.query(
+          `UPDATE matter
+              SET citizen_id = $1, updated_at = now()
+            WHERE citizen_id IS NULL
+              AND session_id = $2
+          RETURNING matter_id`,
+          [user.id, sessionId],
+        );
+        if (claim.rowCount && claim.rowCount > 0) {
+          console.log(
+            `[claim] reassigned ${claim.rowCount} matter(s) from session ${sessionId} to user ${user.id}`,
+          );
+        }
+      }
     }
 
     // Issue tokens
