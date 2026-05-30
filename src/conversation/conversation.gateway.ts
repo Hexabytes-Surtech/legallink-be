@@ -19,11 +19,22 @@ interface AuthenticatedSocket extends Socket {
   role: string;
   consultationId: string;
   matterId: string;
+  readOnly?: boolean; // true when the consultation is 'closed' — history viewable, writes rejected (C-1)
 }
 
 @WebSocketGateway({
   namespace: '/ws',
-  cors: { origin: '*', credentials: true },
+  cors: {
+    origin: (origin: string, cb: (err: null, allow: boolean) => void) => {
+      const allowed = process.env.CORS_ORIGIN?.split(',') ?? ['*'];
+      if (allowed.includes('*') || !origin || allowed.includes(origin)) {
+        cb(null, true);
+      } else {
+        cb(null, false);
+      }
+    },
+    credentials: true,
+  },
 })
 export class ConversationGateway
   implements OnGatewayConnection, OnGatewayDisconnect
@@ -63,12 +74,12 @@ export class ConversationGateway
          LEFT JOIN advocates a ON a.id = cr.advocate_id
          WHERE cr.request_id = $1
            AND (cr.citizen_id = $2 OR a.user_id = $2)
-           AND cr.status = 'accepted'`,
+           AND cr.status IN ('accepted', 'closed')`,
         [consultationId, payload.sub],
       );
 
       if (!result.rows.length) {
-        client.emit('error', { code: 'ACCESS_DENIED', message: 'Consultation not found or not accepted' });
+        client.emit('error', { code: 'ACCESS_DENIED', message: 'Consultation not found or not accessible' });
         client.disconnect();
         return;
       }
@@ -78,6 +89,8 @@ export class ConversationGateway
       (client as AuthenticatedSocket).role = payload.role;
       (client as AuthenticatedSocket).consultationId = consultationId;
       (client as AuthenticatedSocket).matterId = consultation.matter_id;
+      // C-1: closed consultations are read-only — history is sent, but writes are rejected.
+      (client as AuthenticatedSocket).readOnly = consultation.status === 'closed';
 
       client.join(`consultation:${consultationId}`);
 
@@ -90,7 +103,7 @@ export class ConversationGateway
                 created_at AS "timestamp"
          FROM conversation_message
          WHERE request_id = $1
-           AND moderation_status != 'flagged'
+           AND moderation_status = 'cleared'
          ORDER BY created_at ASC`,
         [consultationId],
       );
@@ -118,6 +131,14 @@ export class ConversationGateway
     @MessageBody() data: { text: string },
   ) {
     if (!client.userId) return;
+    // C-1: closed consultations are read-only — reject new messages.
+    if (client.readOnly) {
+      client.emit('warning', {
+        code: 'CONSULTATION_CLOSED',
+        message: 'This consultation is closed. You can view the history but cannot send new messages.',
+      });
+      return;
+    }
     if (!data?.text?.trim()) return;
 
     const content = data.text.trim();
@@ -164,6 +185,27 @@ export class ConversationGateway
     });
   }
 
+  // ── Server-initiated broadcast (C-3 / M-6) ─────────────────────────────────
+
+  /**
+   * Push a now-cleared message into its live room. Called by the admin flow after a
+   * previously-flagged message is approved, so connected participants see it without
+   * reconnecting. No-op if nobody is currently in the room.
+   */
+  emitClearedMessage(
+    consultationId: string,
+    payload: {
+      messageId: string;
+      senderType: string;
+      senderId: string | null;
+      text: string;
+      moderationStatus: string;
+      timestamp: Date;
+    },
+  ) {
+    this.server.to(`consultation:${consultationId}`).emit('message', payload);
+  }
+
   // ── Typing indicator ──────────────────────────────────────────────────────
 
   @SubscribeMessage('typing')
@@ -172,6 +214,7 @@ export class ConversationGateway
     @MessageBody() data: { isTyping: boolean },
   ) {
     if (!client.userId) return;
+    if (client.readOnly) return; // C-1: no typing indicators on closed consultations
     client.to(`consultation:${client.consultationId}`).emit('typing', {
       senderId: client.userId,
       senderType: client.role === 'advocate' ? 'advocate' : 'citizen',

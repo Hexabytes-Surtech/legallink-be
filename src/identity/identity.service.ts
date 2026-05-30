@@ -5,23 +5,56 @@ import {
   ConflictException,
   NotFoundException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { Resend } from 'resend';
 import * as bcrypt from 'bcrypt';
 import { DatabaseService } from '../database/database.service';
+import { EmailService } from '../email/email.service';
+
+// E-4: OTP brute-force guard. In-memory per-email tracker — fine for a single
+// instance; move to Redis/DB if the API is ever horizontally scaled.
+const MAX_OTP_ATTEMPTS = 5;
+const OTP_LOCK_MS = 15 * 60 * 1000; // 15-minute lockout window
 
 @Injectable()
 export class IdentityService {
-  private resend: Resend;
+  private otpAttempts = new Map<string, { count: number; lockedUntil: number }>();
 
   constructor(
     private db: DatabaseService,
     private jwtService: JwtService,
     private configService: ConfigService,
-  ) {
-    this.resend = new Resend(this.configService.get<string>('RESEND_API_KEY'));
+    private emailService: EmailService,
+  ) {}
+
+  // ── E-4 OTP brute-force helpers ─────────────────────────────────────────
+  private assertOtpNotLocked(email: string) {
+    const rec = this.otpAttempts.get(email.toLowerCase());
+    if (rec && rec.lockedUntil > Date.now()) {
+      const retryAfterSec = Math.ceil((rec.lockedUntil - Date.now()) / 1000);
+      throw new HttpException(
+        { message: 'OTP_LOCKED', retryAfterSec },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  private registerFailedOtp(email: string) {
+    const key = email.toLowerCase();
+    const rec = this.otpAttempts.get(key) ?? { count: 0, lockedUntil: 0 };
+    rec.count += 1;
+    if (rec.count >= MAX_OTP_ATTEMPTS) {
+      rec.lockedUntil = Date.now() + OTP_LOCK_MS;
+      rec.count = 0; // reset counter; lockout window now gates further attempts
+    }
+    this.otpAttempts.set(key, rec);
+  }
+
+  private clearOtpAttempts(email: string) {
+    this.otpAttempts.delete(email.toLowerCase());
   }
 
   // ── API 1 — POST /api/auth/register ─────────────────────────────────────
@@ -100,6 +133,9 @@ export class IdentityService {
 
   // ── API 2 — POST /api/auth/verify-otp ───────────────────────────────────
   async verifyOtp(email: string, otp: string, res: any, req?: any) {
+    // E-4: reject early if this email is currently locked out from too many bad OTPs.
+    this.assertOtpNotLocked(email);
+
     const result = await this.db.query(
       `SELECT id, role, preferred_language, otp_code, otp_expires_at FROM users WHERE email = $1`,
       [email],
@@ -121,8 +157,14 @@ export class IdentityService {
       otp === this.configService.get<string>('BYPASS_OTP_CODE');
     if (!bypassOtp) {
       const isMatch = await bcrypt.compare(otp, user.otp_code);
-      if (!isMatch) throw new UnauthorizedException('INVALID_OTP');
+      if (!isMatch) {
+        this.registerFailedOtp(email); // E-4: count this failure, lock after the threshold
+        throw new UnauthorizedException('INVALID_OTP');
+      }
     }
+
+    // E-4: successful verification resets the brute-force counter for this email.
+    this.clearOtpAttempts(email);
 
     // Mark email as verified, clear OTP fields
     await this.db.query(
@@ -134,11 +176,13 @@ export class IdentityService {
 
     // Auto-create role-specific profile row if it doesn't exist yet
     if (user.role === 'advocate') {
+      // BUG-6: Use NULL for bar_enrolment_number so multiple unverified advocates
+      // don't conflict on the unique constraint
       await this.db.query(
         `INSERT INTO advocates (user_id, bar_enrolment_number, state_bar, name, address, phone, verification_status)
-         VALUES ($1, $2, '', '', '', '', 'pending')
+         VALUES ($1, NULL, '', '', '', '', 'pending')
          ON CONFLICT (user_id) DO NOTHING`,
-        [user.id, `temp_${user.id}`],
+        [user.id],
       );
     }
 
@@ -151,11 +195,12 @@ export class IdentityService {
 
       // Claim-on-OTP-verify: any anonymous matters tied to this browser's
       // session cookie are reassigned to the freshly-authenticated user.
+      // Also clears expires_at so claimed matters never auto-delete (Category 1B).
       const sessionId: string | undefined = req?.anonymousSessionId;
       if (sessionId) {
         const claim = await this.db.query(
           `UPDATE matter
-              SET citizen_id = $1, updated_at = now()
+              SET citizen_id = $1, expires_at = NULL, updated_at = now()
             WHERE citizen_id IS NULL
               AND session_id = $2
           RETURNING matter_id`,
@@ -296,21 +341,6 @@ export class IdentityService {
   }
 
   private async sendOtpEmail(email: string, otp: string) {
-    try {
-      const emailResponse = await this.resend.emails.send({
-        from: this.configService.get<string>('RESEND_FROM_EMAIL') as string,
-        to: email,
-        subject: 'Your LegalLink OTP',
-        html: `<p>Your OTP is <strong>${otp}</strong>. It expires in 10 minutes.</p>`,
-      });
-
-      if (emailResponse.error) {
-        console.error('Resend error:', emailResponse.error);
-        throw new Error(`Resend Error: ${emailResponse.error.message}`);
-      }
-    } catch (error) {
-      console.error('sendOtpEmail Error:', error);
-      throw error;
-    }
+    await this.emailService.sendOtp(email, otp);
   }
 }

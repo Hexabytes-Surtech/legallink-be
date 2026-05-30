@@ -67,19 +67,19 @@ describe('UserService', () => {
   });
 
   describe('updateProfile', () => {
-    it('should update phone only', async () => {
+    it('should update address only', async () => {
       db.query.mockResolvedValueOnce({ rows: [] });
       db.query.mockResolvedValueOnce({ rows: [mockUser] });
 
       const result = await service.updateProfile('user-uuid-123', {
-        phone: '+919876543210',
+        address: '12 Park Street, Kolkata',
       });
 
       expect(result).toEqual(mockUser);
       expect(db.query).toHaveBeenNthCalledWith(
         1,
-        expect.stringContaining('UPDATE users SET phone'),
-        expect.arrayContaining(['+919876543210', 'user-uuid-123']),
+        expect.stringContaining('UPDATE users SET address'),
+        expect.arrayContaining(['12 Park Street, Kolkata', 'user-uuid-123']),
       );
     });
 
@@ -99,19 +99,19 @@ describe('UserService', () => {
       );
     });
 
-    it('should update both phone and preferred_language', async () => {
+    it('should update both name and preferred_language', async () => {
       db.query.mockResolvedValueOnce({ rows: [] });
       db.query.mockResolvedValueOnce({ rows: [mockUser] });
 
       const result = await service.updateProfile('user-uuid-123', {
-        phone: '+919876543210',
+        name: 'Updated Name',
         preferred_language: 'bn',
       });
 
       expect(result).toEqual(mockUser);
       expect(db.query).toHaveBeenNthCalledWith(
         1,
-        expect.stringContaining('phone'),
+        expect.stringContaining('name'),
         expect.any(Array),
       );
       expect(db.query).toHaveBeenNthCalledWith(

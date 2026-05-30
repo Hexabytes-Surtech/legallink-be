@@ -7,6 +7,11 @@ import {
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CreateConsultationDto } from './dto/create-consultation.dto';
+import {
+  generateDaySlotKeys,
+  instantToIstKey,
+  instantToIstParts,
+} from '../common/time/ist-time.util';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -25,6 +30,12 @@ export class ConsultationService {
     }
     if (dto.citizenNote && dto.citizenNote.length > 1000) {
       throw new BadRequestException('CITIZEN_NOTE_TOO_LONG');
+    }
+    let scheduledAt: Date | null = null;
+    if (dto.scheduledAt) {
+      scheduledAt = new Date(dto.scheduledAt);
+      if (isNaN(scheduledAt.getTime())) throw new BadRequestException('SCHEDULED_AT_INVALID');
+      if (scheduledAt <= new Date()) throw new BadRequestException('SCHEDULED_AT_MUST_BE_FUTURE');
     }
 
     // Verify matter exists and belongs to this citizen
@@ -47,6 +58,34 @@ export class ConsultationService {
     if (!advocateResult.rows.length) throw new NotFoundException('ADVOCATE_NOT_FOUND');
     if (advocateResult.rows[0].verification_status !== 'verified') {
       throw new BadRequestException('ADVOCATE_NOT_VERIFIED');
+    }
+
+    // B-1 bounds check: if booking a specific time, it must fall on one of the
+    // advocate's generated open slots (right weekday + within an active grid row,
+    // on a slot boundary). All time math goes through the shared IST helper so this
+    // can never drift from the availability slot generation in availability.service.
+    if (scheduledAt) {
+      const { date, dayOfWeek } = instantToIstParts(scheduledAt);
+      const grid = await this.db.query(
+        `SELECT start_time, end_time, slot_duration_minutes
+         FROM advocate_availability
+         WHERE advocate_id = $1 AND day_of_week = $2 AND is_active = true`,
+        [dto.advocateId, dayOfWeek],
+      );
+      const openKeys = new Set<string>();
+      for (const row of grid.rows) {
+        for (const key of generateDaySlotKeys(
+          date,
+          row.start_time,
+          row.end_time,
+          row.slot_duration_minutes,
+        )) {
+          openKeys.add(key);
+        }
+      }
+      if (!openKeys.has(instantToIstKey(scheduledAt))) {
+        throw new BadRequestException('SLOT_NOT_AVAILABLE');
+      }
     }
 
     // Prevent duplicate pending/accepted request on the same matter+advocate pair
@@ -74,6 +113,25 @@ export class ConsultationService {
           [citizenUserId, dto.matterId],
         );
       }
+      if (scheduledAt) {
+        // B-1 collision check inside the tx: no other live booking for this
+        // advocate at the same instant. scheduled_at is timestamptz, so exact
+        // instant equality is correct.
+        const clash = await q(
+          `SELECT 1 FROM consultation_appointment ca
+           JOIN consultation_request cr ON cr.request_id = ca.consultation_id
+           WHERE cr.advocate_id = $1 AND ca.scheduled_at = $2 AND ca.status = 'scheduled'`,
+          [dto.advocateId, scheduledAt.toISOString()],
+        );
+        if (clash.rows.length) {
+          throw new ConflictException('SLOT_ALREADY_BOOKED');
+        }
+        await q(
+          `INSERT INTO consultation_appointment (consultation_id, scheduled_at)
+           VALUES ($1, $2)`,
+          [ins.rows[0].request_id, scheduledAt.toISOString()],
+        );
+      }
       return ins.rows[0];
     });
 
@@ -95,8 +153,13 @@ export class ConsultationService {
               cr.citizen_id  AS "citizenId",
               cr.citizen_note AS "citizenNote",
               cr.advocate_note AS "advocateNote",
-              cr.created_at, cr.updated_at
+              cr.citizen_read AS "citizenRead",
+              cr.created_at, cr.updated_at,
+              ca.id AS "appointmentId",
+              ca.scheduled_at AS "scheduledAt",
+              ca.status AS "appointmentStatus"
        FROM consultation_request cr
+       LEFT JOIN consultation_appointment ca ON ca.consultation_id = cr.request_id
        WHERE cr.request_id = $1
          AND (cr.citizen_id = $2 OR cr.advocate_id IN (
                SELECT id FROM advocates WHERE user_id = $2
@@ -104,23 +167,92 @@ export class ConsultationService {
       [consultationId, userId],
     );
     if (!result.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
-    return result.rows[0];
+
+    // Category 4: Mark as read when citizen fetches this consultation
+    const row = result.rows[0];
+    if (row.citizenId === userId && !row.citizenRead) {
+      await this.db.query(
+        `UPDATE consultation_request SET citizen_read = TRUE WHERE request_id = $1 AND citizen_id = $2`,
+        [consultationId, userId],
+      );
+    }
+
+    return row;
   }
 
-  // ── GET /api/consultations (citizen's own list) ───────────────────────────
+  // ── GET /api/consultations (citizen's own list) — enriched ───────────────
   async listMyCitizenConsultations(citizenUserId: string) {
     const result = await this.db.query(
       `SELECT cr.request_id AS "consultationId", cr.status,
               cr.matter_id, cr.advocate_id,
+              cr.citizen_read AS "unread",
               m.intake_text AS query,
               m.intake_language AS language,
-              cr.created_at, cr.updated_at
+              a.name AS "advocateName",
+              a.verification_status AS "advocateVerificationStatus",
+              (SELECT mbv.brief_json->>'en_main_analysis'
+               FROM matter_brief_version mbv
+               WHERE mbv.matter_id = m.matter_id
+               ORDER BY mbv.generated_at DESC LIMIT 1) AS "matterBrief",
+              cr.created_at, cr.updated_at,
+              ca.id AS "appointmentId",
+              ca.scheduled_at AS "scheduledAt",
+              ca.status AS "appointmentStatus"
        FROM consultation_request cr
        JOIN matter m ON m.matter_id = cr.matter_id
+       LEFT JOIN advocates a ON a.id = cr.advocate_id
+       LEFT JOIN consultation_appointment ca ON ca.consultation_id = cr.request_id
        WHERE cr.citizen_id = $1
        ORDER BY cr.created_at DESC`,
       [citizenUserId],
     );
-    return result.rows;
+    // citizen_read=TRUE means seen, so unread=FALSE means badge should show
+    return result.rows.map((r) => ({ ...r, unread: r.unread === false }));
+  }
+
+  // ── GET /api/consultations/unread-count ──────────────────────────────────
+  async getUnreadCount(citizenUserId: string) {
+    const result = await this.db.query(
+      `SELECT COUNT(*)::int AS count
+       FROM consultation_request
+       WHERE citizen_id = $1 AND citizen_read = FALSE`,
+      [citizenUserId],
+    );
+    return { count: result.rows[0].count };
+  }
+
+  // ── PUT /api/consultations/:id/close ─────────────────────────────────────
+  async closeConsultation(consultationId: string, citizenUserId: string) {
+    const existing = await this.db.query(
+      `SELECT request_id, status, citizen_id FROM consultation_request WHERE request_id = $1`,
+      [consultationId],
+    );
+    if (!existing.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
+
+    const row = existing.rows[0];
+    if (row.citizen_id !== citizenUserId) throw new NotFoundException('CONSULTATION_NOT_FOUND');
+    if (row.status !== 'accepted') {
+      throw new BadRequestException('Only accepted consultations can be closed');
+    }
+
+    // C-2: closing the consultation also completes any still-scheduled appointment,
+    // so appointment status no longer gets stuck on 'scheduled' forever. Done in one
+    // transaction with the close so the two states can't diverge.
+    await this.db.withTransaction(async (q) => {
+      await q(
+        `UPDATE consultation_request
+         SET status = 'closed', citizen_read = TRUE, updated_at = NOW()
+         WHERE request_id = $1`,
+        [consultationId],
+      );
+      await q(
+        `UPDATE consultation_appointment
+         SET status = 'completed', updated_at = NOW()
+         WHERE consultation_id = $1 AND status = 'scheduled'`,
+        [consultationId],
+      );
+    });
+
+    return { consultationId, status: 'closed' };
   }
 }

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 1nVMpVLgoOwbXwcWg2TRbd5GjyRLVfAG6g8dv5t5Q6QgsChVgkidw5f3OwB4Skv
+\restrict kY0dMwnGMqsARyDie9q32LyYtMR9OcxsO1koS7ubGY6z0CxCjTgOnJs7zPh0MGb
 
 -- Dumped from database version 18.4 (365f1e4)
 -- Dumped by pg_dump version 18.0
@@ -88,6 +88,26 @@ CREATE TABLE public.advocate (
 ALTER TABLE public.advocate OWNER TO neondb_owner;
 
 --
+-- Name: advocate_availability; Type: TABLE; Schema: public; Owner: neondb_owner
+--
+
+CREATE TABLE public.advocate_availability (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    advocate_id uuid NOT NULL,
+    day_of_week integer NOT NULL,
+    start_time time without time zone NOT NULL,
+    end_time time without time zone NOT NULL,
+    slot_duration_minutes integer DEFAULT 30 NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    CONSTRAINT advocate_availability_day_of_week_check CHECK (((day_of_week >= 0) AND (day_of_week <= 6))),
+    CONSTRAINT advocate_availability_slot_duration_minutes_check CHECK ((slot_duration_minutes = ANY (ARRAY[15, 30, 60]))),
+    CONSTRAINT chk_end_after_start CHECK ((end_time > start_time))
+);
+
+
+ALTER TABLE public.advocate_availability OWNER TO neondb_owner;
+
+--
 -- Name: advocate_verification_documents; Type: TABLE; Schema: public; Owner: neondb_owner
 --
 
@@ -109,7 +129,7 @@ ALTER TABLE public.advocate_verification_documents OWNER TO neondb_owner;
 CREATE TABLE public.advocates (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     user_id uuid,
-    bar_enrolment_number character varying(50) NOT NULL,
+    bar_enrolment_number character varying(50),
     state_bar character varying(100) NOT NULL,
     name character varying(255) NOT NULL,
     address text NOT NULL,
@@ -123,7 +143,8 @@ CREATE TABLE public.advocates (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     phone character varying(20) DEFAULT ''::character varying NOT NULL,
     bio text,
-    CONSTRAINT advocates_verification_status_check CHECK (((verification_status)::text = ANY ((ARRAY['pending'::character varying, 'verified'::character varying, 'rejected'::character varying])::text[])))
+    submitted_at timestamp with time zone,
+    CONSTRAINT advocates_verification_status_check CHECK (((verification_status)::text = ANY ((ARRAY['pending'::character varying, 'submitted'::character varying, 'verified'::character varying, 'rejected'::character varying])::text[])))
 );
 
 
@@ -153,6 +174,44 @@ COMMENT ON TABLE public.citizens IS 'Citizen-specific profile row. One per user 
 
 
 --
+-- Name: consultation_appointment; Type: TABLE; Schema: public; Owner: neondb_owner
+--
+
+CREATE TABLE public.consultation_appointment (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    consultation_id uuid NOT NULL,
+    scheduled_at timestamp with time zone NOT NULL,
+    duration_minutes integer DEFAULT 30 NOT NULL,
+    status text DEFAULT 'scheduled'::text NOT NULL,
+    advocate_notes text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT consultation_appointment_status_check CHECK ((status = ANY (ARRAY['scheduled'::text, 'completed'::text, 'cancelled'::text, 'no_show'::text])))
+);
+
+
+ALTER TABLE public.consultation_appointment OWNER TO neondb_owner;
+
+--
+-- Name: consultation_feedback; Type: TABLE; Schema: public; Owner: neondb_owner
+--
+
+CREATE TABLE public.consultation_feedback (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    consultation_id uuid NOT NULL,
+    citizen_id uuid NOT NULL,
+    advocate_id uuid NOT NULL,
+    rating integer NOT NULL,
+    comment text,
+    is_visible boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT consultation_feedback_rating_check CHECK (((rating >= 1) AND (rating <= 5)))
+);
+
+
+ALTER TABLE public.consultation_feedback OWNER TO neondb_owner;
+
+--
 -- Name: consultation_request; Type: TABLE; Schema: public; Owner: neondb_owner
 --
 
@@ -166,6 +225,7 @@ CREATE TABLE public.consultation_request (
     advocate_note text,
     created_at timestamp without time zone DEFAULT now(),
     updated_at timestamp without time zone DEFAULT now(),
+    citizen_read boolean DEFAULT true,
     CONSTRAINT consultation_request_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'accepted'::text, 'declined'::text, 'closed'::text])))
 );
 
@@ -329,7 +389,8 @@ CREATE TABLE public.matter (
     missing_info_questions jsonb,
     reviewer_note text,
     reviewed_at timestamp without time zone,
-    session_id uuid
+    session_id uuid,
+    expires_at timestamp with time zone
 );
 
 
@@ -512,6 +573,14 @@ COMMENT ON COLUMN public.users.address IS 'Home / correspondence address — com
 
 
 --
+-- Name: advocate_availability advocate_availability_pkey; Type: CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.advocate_availability
+    ADD CONSTRAINT advocate_availability_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: advocate advocate_enrolment_number_key; Type: CONSTRAINT; Schema: public; Owner: neondb_owner
 --
 
@@ -573,6 +642,38 @@ ALTER TABLE ONLY public.citizens
 
 ALTER TABLE ONLY public.citizens
     ADD CONSTRAINT citizens_user_id_key UNIQUE (user_id);
+
+
+--
+-- Name: consultation_appointment consultation_appointment_consultation_id_key; Type: CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.consultation_appointment
+    ADD CONSTRAINT consultation_appointment_consultation_id_key UNIQUE (consultation_id);
+
+
+--
+-- Name: consultation_appointment consultation_appointment_pkey; Type: CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.consultation_appointment
+    ADD CONSTRAINT consultation_appointment_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: consultation_feedback consultation_feedback_consultation_id_key; Type: CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.consultation_feedback
+    ADD CONSTRAINT consultation_feedback_consultation_id_key UNIQUE (consultation_id);
+
+
+--
+-- Name: consultation_feedback consultation_feedback_pkey; Type: CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.consultation_feedback
+    ADD CONSTRAINT consultation_feedback_pkey PRIMARY KEY (id);
 
 
 --
@@ -704,6 +805,14 @@ ALTER TABLE ONLY public.response_trace
 
 
 --
+-- Name: advocate_availability uq_advocate_day_start; Type: CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.advocate_availability
+    ADD CONSTRAINT uq_advocate_day_start UNIQUE (advocate_id, day_of_week, start_time);
+
+
+--
 -- Name: users uq_users_email; Type: CONSTRAINT; Schema: public; Owner: neondb_owner
 --
 
@@ -760,6 +869,34 @@ CREATE INDEX idx_advocates_user_id ON public.advocates USING btree (user_id);
 --
 
 CREATE INDEX idx_advocates_verification_status ON public.advocates USING btree (verification_status);
+
+
+--
+-- Name: idx_appt_consultation_id; Type: INDEX; Schema: public; Owner: neondb_owner
+--
+
+CREATE INDEX idx_appt_consultation_id ON public.consultation_appointment USING btree (consultation_id);
+
+
+--
+-- Name: idx_appt_scheduled_at; Type: INDEX; Schema: public; Owner: neondb_owner
+--
+
+CREATE INDEX idx_appt_scheduled_at ON public.consultation_appointment USING btree (scheduled_at);
+
+
+--
+-- Name: idx_avail_advocate_id; Type: INDEX; Schema: public; Owner: neondb_owner
+--
+
+CREATE INDEX idx_avail_advocate_id ON public.advocate_availability USING btree (advocate_id);
+
+
+--
+-- Name: idx_avail_day; Type: INDEX; Schema: public; Owner: neondb_owner
+--
+
+CREATE INDEX idx_avail_day ON public.advocate_availability USING btree (advocate_id, day_of_week) WHERE (is_active = true);
 
 
 --
@@ -844,6 +981,20 @@ CREATE INDEX idx_documents_matter_id ON public.documents USING btree (matter_id)
 --
 
 CREATE INDEX idx_documents_uploader_id ON public.documents USING btree (uploader_id);
+
+
+--
+-- Name: idx_feedback_advocate_id; Type: INDEX; Schema: public; Owner: neondb_owner
+--
+
+CREATE INDEX idx_feedback_advocate_id ON public.consultation_feedback USING btree (advocate_id);
+
+
+--
+-- Name: idx_feedback_created_at; Type: INDEX; Schema: public; Owner: neondb_owner
+--
+
+CREATE INDEX idx_feedback_created_at ON public.consultation_feedback USING btree (created_at DESC);
 
 
 --
@@ -1071,6 +1222,14 @@ CREATE TRIGGER trg_users_updated_at BEFORE UPDATE ON public.users FOR EACH ROW E
 
 
 --
+-- Name: advocate_availability advocate_availability_advocate_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.advocate_availability
+    ADD CONSTRAINT advocate_availability_advocate_id_fkey FOREIGN KEY (advocate_id) REFERENCES public.advocates(id) ON DELETE CASCADE;
+
+
+--
 -- Name: advocate_verification_documents advocate_verification_documents_advocate_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: neondb_owner
 --
 
@@ -1092,6 +1251,38 @@ ALTER TABLE ONLY public.advocates
 
 ALTER TABLE ONLY public.citizens
     ADD CONSTRAINT citizens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: consultation_appointment consultation_appointment_consultation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.consultation_appointment
+    ADD CONSTRAINT consultation_appointment_consultation_id_fkey FOREIGN KEY (consultation_id) REFERENCES public.consultation_request(request_id) ON DELETE CASCADE;
+
+
+--
+-- Name: consultation_feedback consultation_feedback_advocate_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.consultation_feedback
+    ADD CONSTRAINT consultation_feedback_advocate_id_fkey FOREIGN KEY (advocate_id) REFERENCES public.advocates(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: consultation_feedback consultation_feedback_citizen_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.consultation_feedback
+    ADD CONSTRAINT consultation_feedback_citizen_id_fkey FOREIGN KEY (citizen_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: consultation_feedback consultation_feedback_consultation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.consultation_feedback
+    ADD CONSTRAINT consultation_feedback_consultation_id_fkey FOREIGN KEY (consultation_id) REFERENCES public.consultation_request(request_id) ON DELETE CASCADE;
 
 
 --
@@ -1191,6 +1382,14 @@ ALTER TABLE ONLY public.matter_advocate_shortlist
 
 
 --
+-- Name: matter_advocate_shortlist matter_advocate_shortlist_matter_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: neondb_owner
+--
+
+ALTER TABLE ONLY public.matter_advocate_shortlist
+    ADD CONSTRAINT matter_advocate_shortlist_matter_id_fkey FOREIGN KEY (matter_id) REFERENCES public.matter(matter_id) ON DELETE CASCADE;
+
+
+--
 -- Name: matter_brief_version matter_brief_version_matter_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: neondb_owner
 --
 
@@ -1256,5 +1455,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE cloud_admin IN SCHEMA public GRANT ALL ON TABL
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 1nVMpVLgoOwbXwcWg2TRbd5GjyRLVfAG6g8dv5t5Q6QgsChVgkidw5f3OwB4Skv
+\unrestrict kY0dMwnGMqsARyDie9q32LyYtMR9OcxsO1koS7ubGY6z0CxCjTgOnJs7zPh0MGb
 
