@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Controller, Get, Param, ParseUUIDPipe, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { AdvocateService } from './advocate.service';
 import { AdvocatesQueryDto } from './dto/advocates-query.dto';
@@ -23,7 +23,7 @@ export class AdvocatePublicController {
   @ApiOperation({ summary: 'Public advocate profile' })
   @ApiResponse({ status: 200, description: 'Full public profile' })
   @ApiResponse({ status: 404, description: 'Advocate not found' })
-  getById(@Param('id') id: string) {
+  getById(@Param('id', ParseUUIDPipe) id: string) {
     return this.advocateService.getPublicById(id);
   }
 }

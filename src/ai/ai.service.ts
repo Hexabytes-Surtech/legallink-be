@@ -207,15 +207,31 @@ export class AiService {
       [matterId, language === 'bn' ? 'bn' : 'en', JSON.stringify(briefJson), units.length > 0],
     );
 
-    // Insert matter_citation rows — best-effort (FK target legal_document_unit may not
-    // contain the IDs we read from legal_unit; brief_json carries the citation text anyway).
-    for (const unit of units) {
+    // M-3 fix: citation chips must reference legal_document_unit — the FK target of
+    // matter_citation AND the table GET /matter/:id reads from. The mock previously
+    // inserted legal_unit ids, which silently failed the FK → empty chips whenever
+    // Gemini wasn't configured. Here we FTS-match the query keywords against
+    // legal_document_unit so the chips populate on the mock path too. Best-effort:
+    // if nothing matches, chips are simply empty (no worse than before).
+    const citationLookup = await this.db.query(
+      `SELECT unit_id
+       FROM legal_document_unit
+       WHERE to_tsvector('english',
+               coalesce(doc_title, '') || ' ' || coalesce(node_label, '') || ' ' ||
+               coalesce(citation_text, '') || ' ' || coalesce(text_content, ''))
+             @@ plainto_tsquery('english', $1)
+       LIMIT 3`,
+      [match.keywords.join(' ')],
+    );
+    let lexicalRank = 0;
+    for (const row of citationLookup.rows) {
+      lexicalRank += 1;
       try {
         await this.db.query(
-          `INSERT INTO matter_citation (matter_id, unit_id, relevance_score, retrieval_method)
-           VALUES ($1, $2, $3, 'keyword')
+          `INSERT INTO matter_citation (matter_id, unit_id, relevance_score, retrieval_method, lexical_rank)
+           VALUES ($1, $2, $3, 'keyword', $4)
            ON CONFLICT DO NOTHING`,
-          [matterId, unit.unit_id, 0.80],
+          [matterId, row.unit_id, 0.80, lexicalRank],
         );
       } catch (err) {
         this.logger.warn(`Mock citation insert skipped (${(err as Error).message.slice(0, 80)})`);

@@ -3,11 +3,13 @@ import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { AdvocateService } from './advocate.service';
 import { DatabaseService } from '../database/database.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import { EmailService } from '../email/email.service';
 
 describe('AdvocateService', () => {
   let service: AdvocateService;
   let db: jest.Mocked<DatabaseService>;
   let cloudinaryService: jest.Mocked<CloudinaryService>;
+  let emailService: jest.Mocked<EmailService>;
 
   const mockAdvocate = {
     id: 'advocate-uuid-123',
@@ -57,17 +59,24 @@ describe('AdvocateService', () => {
       uploadFile: jest.fn(),
     };
 
+    const mockEmailService = {
+      sendConsultationAccepted: jest.fn().mockResolvedValue(undefined),
+      sendConsultationDeclined: jest.fn().mockResolvedValue(undefined),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdvocateService,
         { provide: DatabaseService, useValue: mockDb },
         { provide: CloudinaryService, useValue: mockCloudinaryService },
+        { provide: EmailService, useValue: mockEmailService },
       ],
     }).compile();
 
     service = module.get<AdvocateService>(AdvocateService);
     db = module.get(DatabaseService);
     cloudinaryService = module.get(CloudinaryService);
+    emailService = module.get(EmailService);
 
     jest.clearAllMocks();
   });
@@ -285,13 +294,17 @@ describe('AdvocateService', () => {
       const mockConsultations = [
         {
           id: 'cons-1',
-          status: 'requested',
+          status: 'pending',
           requested_at: new Date(),
-          accepted_at: null,
+          updated_at: new Date(),
+          citizen_note: null,
+          advocate_note: null,
+          matter_id: 'matter-1',
           query_text: 'Legal question',
           query_language: 'en',
           classification: 'family',
           citizen_user_id: 'citizen-1',
+          citizen_name: 'Citizen',
         },
       ];
       db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
@@ -300,6 +313,17 @@ describe('AdvocateService', () => {
       const result = await service.getConsultations('user-uuid-123');
 
       expect(result).toEqual(mockConsultations);
+    });
+
+    it('should select citizen_name and NOT expose citizen_email (privacy)', async () => {
+      db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      await service.getConsultations('user-uuid-123');
+
+      const consultationsSql = db.query.mock.calls[1][0] as string;
+      expect(consultationsSql).toEqual(expect.stringContaining('citizen_name'));
+      expect(consultationsSql).not.toContain('citizen_email');
     });
 
     it('should throw NotFoundException when advocate not found', async () => {
@@ -348,8 +372,11 @@ describe('AdvocateService', () => {
   describe('updateConsultation', () => {
     it('should accept consultation', async () => {
       const existingConsultation = {
-        id: 'cons-1',
-        status: 'requested',
+        request_id: 'cons-1',
+        status: 'pending',
+        citizen_id: 'citizen-1',
+        matter_summary: 'A legal matter',
+        citizen_email: 'citizen@example.com',
       };
       db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
       db.query.mockResolvedValueOnce({ rows: [existingConsultation] });
@@ -365,12 +392,20 @@ describe('AdvocateService', () => {
         consultationId: 'cons-1',
         status: 'accepted',
       });
+      expect(emailService.sendConsultationAccepted).toHaveBeenCalledWith(
+        'citizen@example.com',
+        expect.any(String),
+        expect.any(String),
+      );
     });
 
     it('should decline consultation with reason', async () => {
       const existingConsultation = {
-        id: 'cons-1',
-        status: 'requested',
+        request_id: 'cons-1',
+        status: 'pending',
+        citizen_id: 'citizen-1',
+        matter_summary: 'A legal matter',
+        citizen_email: 'citizen@example.com',
       };
       db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
       db.query.mockResolvedValueOnce({ rows: [existingConsultation] });
@@ -388,6 +423,11 @@ describe('AdvocateService', () => {
         status: 'declined',
         declineReason: 'Schedule conflict',
       });
+      expect(emailService.sendConsultationDeclined).toHaveBeenCalledWith(
+        'citizen@example.com',
+        expect.any(String),
+        'Schedule conflict',
+      );
     });
 
     it('should throw NotFoundException when consultation not found', async () => {
@@ -399,10 +439,13 @@ describe('AdvocateService', () => {
       ).rejects.toThrow(NotFoundException);
     });
 
-    it('should throw BadRequestException when consultation not in requested state', async () => {
+    it('should throw BadRequestException when consultation not in pending state', async () => {
       const existingConsultation = {
-        id: 'cons-1',
+        request_id: 'cons-1',
         status: 'accepted',
+        citizen_id: 'citizen-1',
+        matter_summary: 'A legal matter',
+        citizen_email: 'citizen@example.com',
       };
       db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
       db.query.mockResolvedValueOnce({ rows: [existingConsultation] });
@@ -424,6 +467,7 @@ describe('AdvocateService', () => {
       };
       db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
       db.query.mockResolvedValueOnce({ rows: [mockStats] });
+      db.query.mockResolvedValueOnce({ rows: [{ average_rating: '4.5' }] });
 
       const result = await service.getDashboard('user-uuid-123');
 
@@ -432,6 +476,7 @@ describe('AdvocateService', () => {
         verificationStatus: 'pending',
         profileCompleteness: expect.any(Number),
         consultationStats: mockStats,
+        averageRating: 4.5,
       });
     });
 
@@ -460,7 +505,7 @@ describe('AdvocateService', () => {
 
       expect(result).toEqual({
         advocateId: 'advocate-uuid-123',
-        verificationStatus: 'pending',
+        verificationStatus: 'submitted',
         message: 'Profile submitted for admin review',
       });
     });

@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import { EmailService } from '../email/email.service';
 import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { AdvocatesQueryDto } from './dto/advocates-query.dto';
@@ -14,6 +15,7 @@ export class AdvocateService {
   constructor(
     private db: DatabaseService,
     private cloudinaryService: CloudinaryService,
+    private emailService: EmailService,
   ) {}
 
   // ── GET /api/advocate/me ───────────────────────────────────────────────
@@ -136,9 +138,11 @@ export class AdvocateService {
               cr.citizen_note, cr.advocate_note,
               m.matter_id, m.intake_text AS query_text, m.intake_language AS query_language,
               m.classification_json AS classification,
-              cr.citizen_id AS citizen_user_id
+              cr.citizen_id AS citizen_user_id,
+              COALESCE(u.name, 'Citizen') AS citizen_name
        FROM consultation_request cr
        JOIN matter m ON m.matter_id = cr.matter_id
+       LEFT JOIN users u ON u.id = cr.citizen_id
        WHERE cr.advocate_id = $1
        ORDER BY cr.created_at DESC`,
       [advocate.id],
@@ -175,8 +179,13 @@ export class AdvocateService {
   ) {
     const advocate = await this.getAdvocateByUserId(userId);
     const existing = await this.db.query(
-      `SELECT request_id, status FROM consultation_request
-       WHERE request_id = $1 AND advocate_id = $2`,
+      `SELECT cr.request_id, cr.status, cr.citizen_id,
+              m.intake_text AS matter_summary,
+              u.email AS citizen_email
+       FROM consultation_request cr
+       JOIN matter m ON m.matter_id = cr.matter_id
+       LEFT JOIN users u ON u.id = cr.citizen_id
+       WHERE cr.request_id = $1 AND cr.advocate_id = $2`,
       [consultationId, advocate.id],
     );
     if (!existing.rows.length) throw new NotFoundException('Consultation not found');
@@ -185,32 +194,59 @@ export class AdvocateService {
 
     const newStatus = action === 'accept' ? 'accepted' : 'declined';
     const advocateNote = declineReason ?? null;
+
+    // Category 4: Set citizen_read=FALSE so citizen's badge lights up.
     await this.db.query(
       `UPDATE consultation_request
-       SET status = $1, advocate_note = $2, updated_at = NOW()
+       SET status = $1, advocate_note = $2, citizen_read = FALSE, updated_at = NOW()
        WHERE request_id = $3`,
       [newStatus, advocateNote, consultationId],
     );
+
+    // Category 5: Notify citizen by email (non-fatal).
+    const { citizen_email, matter_summary } = existing.rows[0];
+    if (citizen_email) {
+      if (action === 'accept') {
+        this.emailService
+          .sendConsultationAccepted(citizen_email, advocate.name ?? 'Your advocate', matter_summary ?? '')
+          .catch(() => {});
+      } else {
+        this.emailService
+          .sendConsultationDeclined(citizen_email, advocate.name ?? 'Your advocate', declineReason)
+          .catch(() => {});
+      }
+    }
+
     return { consultationId, status: newStatus, ...(declineReason && { declineReason }) };
   }
 
   async getDashboard(userId: string) {
     const advocate = await this.getAdvocateByUserId(userId);
-    const stats = await this.db.query(
-      `SELECT
-         COUNT(*) FILTER (WHERE status = 'pending')   AS pending_count,
-         COUNT(*) FILTER (WHERE status = 'accepted')  AS accepted_count,
-         COUNT(*) FILTER (WHERE status = 'declined')  AS declined_count,
-         COUNT(*) FILTER (WHERE status = 'closed')    AS closed_count,
-         COUNT(*)                                      AS total_count
-       FROM consultation_request WHERE advocate_id = $1`,
-      [advocate.id],
-    );
+    const [stats, rating] = await Promise.all([
+      this.db.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status = 'pending')   AS pending_count,
+           COUNT(*) FILTER (WHERE status = 'accepted')  AS accepted_count,
+           COUNT(*) FILTER (WHERE status = 'declined')  AS declined_count,
+           COUNT(*) FILTER (WHERE status = 'closed')    AS closed_count,
+           COUNT(*)                                      AS total_count
+         FROM consultation_request WHERE advocate_id = $1`,
+        [advocate.id],
+      ),
+      this.db.query(
+        `SELECT ROUND(AVG(rating)::numeric, 1) AS average_rating
+         FROM consultation_feedback WHERE advocate_id = $1 AND is_visible = true`,
+        [advocate.id],
+      ),
+    ]);
     return {
       advocateId: advocate.id,
       verificationStatus: advocate.verification_status,
       profileCompleteness: this.calculateProfileCompleteness(advocate),
       consultationStats: stats.rows[0],
+      averageRating: rating.rows[0].average_rating
+        ? parseFloat(rating.rows[0].average_rating)
+        : null,
     };
   }
 
@@ -218,11 +254,22 @@ export class AdvocateService {
     const advocate = await this.getAdvocateByUserId(userId);
     if (advocate.verification_status === 'verified')
       throw new BadRequestException('Already verified');
+    if (advocate.verification_status === 'submitted')
+      throw new BadRequestException('Already submitted for review');
     if (!advocate.bar_enrolment_number || !advocate.state_bar || !advocate.name || !advocate.address)
       throw new BadRequestException('Complete your profile before submitting for verification');
+
+    // BUG-1: Actually update the DB — the previous code only returned a message without writing anything.
+    await this.db.query(
+      `UPDATE advocates
+       SET verification_status = 'submitted', submitted_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [advocate.id],
+    );
+
     return {
       advocateId: advocate.id,
-      verificationStatus: advocate.verification_status,
+      verificationStatus: 'submitted',
       message: 'Profile submitted for admin review',
     };
   }
@@ -263,13 +310,17 @@ export class AdvocateService {
 
     const rows = await this.db.query(
       `SELECT a.id, a.name, a.bio, a.practice_areas, a.languages, a.districts,
-              a.state_bar, a.verification_status, u.avatar_url
+              a.state_bar, a.verification_status, u.avatar_url,
+              ROUND(AVG(cf.rating)::numeric, 1) AS rating,
+              COUNT(cf.id)::int AS rating_count
        FROM advocates a
        LEFT JOIN users u ON u.id = a.user_id
+       LEFT JOIN consultation_feedback cf ON cf.advocate_id = a.id AND cf.is_visible = true
        WHERE ($1 = false OR a.verification_status = 'verified')
          AND ($2::text[] IS NULL OR a.practice_areas && $2::text[])
          AND ($3::text[] IS NULL OR a.languages && $3::text[])
          AND ($4::text IS NULL OR $4 = ANY(a.districts))
+       GROUP BY a.id, u.avatar_url
        ORDER BY (a.verification_status = 'verified') DESC, a.name ASC
        LIMIT $5 OFFSET $6`,
       [...filterParams, limit, offset],
@@ -298,10 +349,14 @@ export class AdvocateService {
     const result = await this.db.query(
       `SELECT a.id, a.name, a.bio, a.practice_areas, a.languages, a.districts,
               a.state_bar, a.verification_status, a.courts, a.bar_enrolment_number,
-              u.avatar_url
+              u.avatar_url,
+              ROUND(AVG(cf.rating)::numeric, 1) AS rating,
+              COUNT(cf.id)::int AS rating_count
        FROM advocates a
        LEFT JOIN users u ON u.id = a.user_id
-       WHERE a.id = $1`,
+       LEFT JOIN consultation_feedback cf ON cf.advocate_id = a.id AND cf.is_visible = true
+       WHERE a.id = $1
+       GROUP BY a.id, u.avatar_url`,
       [id],
     );
     if (!result.rows.length) {

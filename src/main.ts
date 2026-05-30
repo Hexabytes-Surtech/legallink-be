@@ -1,10 +1,29 @@
 import { NestFactory } from '@nestjs/core';
+import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  // Global error envelope (E-6) — mirrors the success envelope so the FE has one contract.
+  app.useGlobalFilters(new AllExceptionsFilter());
+
+  // Global request validation (Group A / H-1).
+  // whitelist: strip any property not declared (with a class-validator decorator) on the DTO.
+  // forbidNonWhitelisted: false (Lenient) — unknown props are dropped silently, NOT rejected.
+  //   Flip to true once frontend payloads are audited (see VALIDATION_TRACKING.md).
+  // transform + enableImplicitConversion: coerce primitives (e.g. query "?page=2" string → number).
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: false,
+      transform: true,
+      transformOptions: { enableImplicitConversion: true },
+    }),
+  );
 
     const corsOrigins = (process.env.CORS_ORIGIN || '')
     .split(',')

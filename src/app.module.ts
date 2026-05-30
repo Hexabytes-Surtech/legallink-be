@@ -18,6 +18,11 @@ import { MatterModule } from './matter/matter.module';
 import { ConsultationModule } from './consultation/consultation.module';
 import { ConversationModule } from './conversation/conversation.module';
 import { ModerationModule } from './moderation/moderation.module';
+import { EmailModule } from './email/email.module';
+import { CleanupModule } from './cleanup/cleanup.module';
+import { AvailabilityModule } from './availability/availability.module';
+import { AppointmentModule } from './appointment/appointment.module';
+import { FeedbackModule } from './feedback/feedback.module';
 
 import { ResponseEnvelopeInterceptor } from './common/interceptors/response-envelope.interceptor';
 
@@ -39,6 +44,11 @@ import { ResponseEnvelopeInterceptor } from './common/interceptors/response-enve
     ConsultationModule,
     ConversationModule,
     ModerationModule,
+    EmailModule,
+    CleanupModule,
+    AvailabilityModule,
+    AppointmentModule,
+    FeedbackModule,
   ],
   controllers: [AppController],
   providers: [

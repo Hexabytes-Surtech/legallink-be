@@ -14,6 +14,34 @@ import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
 
 const MAX_DOC_BYTES = 5 * 1024 * 1024; // 5 MB
+
+// BUG-7: AI returns matterType in snake/slash form; advocate practice_areas use title-case labels.
+const MATTER_TYPE_TO_PRACTICE_AREA: Record<string, string> = {
+  motor_vehicle: 'Traffic',
+  'motor_vehicle/traffic_offence': 'Traffic',
+  traffic_offence: 'Traffic',
+  tenancy_dispute: 'Tenancy',
+  domestic_violence: 'Family',
+  family: 'Family',
+  cheque_bounce: 'Civil',
+  civil: 'Civil',
+  civil_dispute: 'Civil',
+  property_dispute: 'Civil',
+  property: 'Civil',
+  consumer_complaint: 'Consumer',
+  consumer: 'Consumer',
+  consumer_dispute: 'Consumer',
+  criminal_matter: 'Criminal',
+  criminal: 'Criminal',
+  criminal_offence: 'Criminal',
+  labour_dispute: 'Labour',
+  labour: 'Labour',
+  labour_employment: 'Labour',
+  employment: 'Labour',
+  divorce: 'Family',
+  maintenance: 'Family',
+  dowry: 'Family',
+};
 const ALLOWED_DOC_MIME = new Set([
   'image/jpeg',
   'image/png',
@@ -49,14 +77,16 @@ export class MatterService {
 
     // Only stamp session_id for anonymous matters — authenticated users own the row directly.
     const sessionForRow = citizenId ? null : sessionId;
+    // Category 1B: anonymous matters expire after 3 days; claimed matters never expire.
+    const expiresAt = citizenId ? null : new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
 
     // 1 — Create matter row in Schema B table
     const insertResult = await this.db.query(
       `INSERT INTO matter
-         (citizen_id, session_id, intake_text, intake_language, preferred_language, status, jurisdiction_state)
-       VALUES ($1, $2, $3, $4, $4, 'created', 'WB')
+         (citizen_id, session_id, intake_text, intake_language, preferred_language, status, jurisdiction_state, expires_at)
+       VALUES ($1, $2, $3, $4, $4, 'created', 'WB', $5)
        RETURNING matter_id`,
-      [citizenId, sessionForRow, trimmedQuery, dto.language],
+      [citizenId, sessionForRow, trimmedQuery, dto.language, expiresAt],
     );
     const matterId: string = insertResult.rows[0].matter_id;
 
@@ -132,19 +162,29 @@ export class MatterService {
     const row = matterResult.rows[0];
 
     // Access rules:
-    //   1. Authenticated requester: must be the owning citizen_id.
-    //   2. Anonymous matter (citizen_id IS NULL): requester's session_id cookie must
-    //      match the matter's session_id — otherwise anyone with the URL could read it.
-    //   3. Authenticated requester reading an anonymous matter whose session belongs
-    //      to them is allowed too (covers in-progress claim flows).
+    //   1. Authenticated citizen: must own this matter (citizen_id match).
+    //   2. Anonymous matter: requester's session cookie must match.
+    //   3. BUG-3: Advocate with an accepted/pending consultation on this matter can also read it.
     if (row.citizen_id) {
       if (!requesterId || row.citizen_id !== requesterId) {
-        throw new NotFoundException('MATTER_NOT_FOUND');
+        // BUG-3: Secondary check — is the requester an advocate on this matter?
+        if (requesterId) {
+          const advocateAccess = await this.db.query(
+            `SELECT cr.request_id FROM consultation_request cr
+             JOIN advocates a ON a.id = cr.advocate_id
+             WHERE cr.matter_id = $1 AND a.user_id = $2`,
+            [matterId, requesterId],
+          );
+          if (!advocateAccess.rows.length) {
+            throw new NotFoundException('MATTER_NOT_FOUND');
+          }
+        } else {
+          throw new NotFoundException('MATTER_NOT_FOUND');
+        }
       }
     } else {
       // Anonymous matter — must own the session.
       if (!sessionId || row.session_id !== sessionId) {
-        // Fallback: if requester is authenticated, the matter is not theirs anyway.
         throw new NotFoundException('MATTER_NOT_FOUND');
       }
     }
@@ -272,8 +312,9 @@ export class MatterService {
       }
     }
 
-    const matterType: string =
-      matter.classification_json?.matterType ?? 'general';
+    const rawMatterType: string = matter.classification_json?.matterType ?? 'general';
+    // BUG-7: Map AI-returned matterType to the practice_area label stored on advocates.
+    const matterType: string = MATTER_TYPE_TO_PRACTICE_AREA[rawMatterType.toLowerCase()] ?? rawMatterType;
     const district: string | null = matter.jurisdiction_district ?? null;
     const language: string = matter.intake_language ?? 'en';
 

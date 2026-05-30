@@ -1,4 +1,4 @@
-import { Controller, Get, Put, Param, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Put, Param, ParseUUIDPipe, Body, UseGuards } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -39,7 +39,7 @@ export class AdminController {
   @ApiResponse({ status: 200, description: 'Verification status updated' })
   @ApiResponse({ status: 404, description: 'Advocate not found' })
   verifyAdvocate(
-    @Param('advocateId') advocateId: string,
+    @Param('advocateId', ParseUUIDPipe) advocateId: string,
     @Body() dto: VerifyAdvocateDto,
   ) {
     return this.adminService.verifyAdvocate(advocateId, dto.action, dto.reason);
@@ -62,7 +62,7 @@ export class AdminController {
   @ApiResponse({ status: 200, description: 'Message moderation status updated' })
   @ApiResponse({ status: 404, description: 'Message not found' })
   updateMessageStatus(
-    @Param('messageId') messageId: string,
+    @Param('messageId', ParseUUIDPipe) messageId: string,
     @Body() dto: UpdateMessageDto,
   ) {
     return this.adminService.updateMessageStatus(messageId, dto.action);

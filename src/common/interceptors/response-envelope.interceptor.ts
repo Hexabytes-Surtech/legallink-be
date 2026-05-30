@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 
 // Wraps every successful controller response in the standard envelope:
 // { success: true, data: <original response>, meta: { timestamp, requestId } }
@@ -19,7 +19,7 @@ export class ResponseEnvelopeInterceptor implements NestInterceptor {
         data,
         meta: {
           timestamp: new Date().toISOString(),
-          requestId: uuidv4(),
+          requestId: randomUUID(),
         },
       })),
     );

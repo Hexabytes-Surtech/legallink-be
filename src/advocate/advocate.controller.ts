@@ -5,6 +5,7 @@ import {
   Post,
   Body,
   Param,
+  ParseUUIDPipe,
   HttpCode,
   UseGuards,
   UseInterceptors,
@@ -121,7 +122,7 @@ export class AdvocateController {
   @ApiOperation({ summary: 'Get single consultation detail' })
   @ApiResponse({ status: 200, description: 'Full consultation with matter info' })
   @ApiResponse({ status: 404, description: 'Consultation not found' })
-  getConsultationById(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+  getConsultationById(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
     return this.advocateService.getConsultationById(user.sub, id);
   }
 
@@ -131,7 +132,7 @@ export class AdvocateController {
   @ApiResponse({ status: 200, description: 'Status updated' })
   updateConsultation(
     @CurrentUser() user: JwtPayload,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ConsultationActionDto,
   ) {
     return this.advocateService.updateConsultation(user.sub, id, dto.action, dto.declineReason);

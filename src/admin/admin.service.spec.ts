@@ -1,11 +1,15 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { AdminService } from './admin.service';
 import { DatabaseService } from '../database/database.service';
+import { EmailService } from '../email/email.service';
+import { ConversationGateway } from '../conversation/conversation.gateway';
 
 describe('AdminService', () => {
   let service: AdminService;
   let db: jest.Mocked<DatabaseService>;
+  let emailService: { sendAdvocateVerified: jest.Mock; sendAdvocateRejected: jest.Mock };
+  let conversationGateway: { emitClearedMessage: jest.Mock };
 
   const mockPendingAdvocates = [
     {
@@ -20,7 +24,8 @@ describe('AdminService', () => {
       courts: ['Calcutta HC'],
       languages: ['en'],
       districts: ['kolkata'],
-      verification_status: 'pending',
+      verification_status: 'submitted',
+      submitted_at: new Date(),
       created_at: new Date(),
       user_email: 'john.user@example.com',
       documents: [
@@ -44,10 +49,25 @@ describe('AdminService', () => {
       courts: ['District Court'],
       languages: ['en', 'bn'],
       districts: ['howrah'],
-      verification_status: 'pending',
+      verification_status: 'submitted',
+      submitted_at: new Date(),
       created_at: new Date(),
       user_email: 'jane.user@example.com',
       documents: [],
+    },
+  ];
+
+  const mockFlaggedMessages = [
+    {
+      messageId: 'msg-1',
+      consultationId: 'req-1',
+      matterId: 'matter-1',
+      senderType: 'client',
+      senderId: 'user-1',
+      content: 'flagged content',
+      moderationStatus: 'flagged',
+      moderationFlags: ['rule36'],
+      createdAt: new Date(),
     },
   ];
 
@@ -56,12 +76,28 @@ describe('AdminService', () => {
       query: jest.fn(),
     };
 
+    const mockEmail = {
+      sendAdvocateVerified: jest.fn().mockResolvedValue(undefined),
+      sendAdvocateRejected: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const mockGateway = {
+      emitClearedMessage: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
-      providers: [AdminService, { provide: DatabaseService, useValue: mockDb }],
+      providers: [
+        AdminService,
+        { provide: DatabaseService, useValue: mockDb },
+        { provide: EmailService, useValue: mockEmail },
+        { provide: ConversationGateway, useValue: mockGateway },
+      ],
     }).compile();
 
     service = module.get<AdminService>(AdminService);
     db = module.get(DatabaseService);
+    emailService = module.get(EmailService);
+    conversationGateway = module.get(ConversationGateway);
 
     jest.clearAllMocks();
   });
@@ -73,7 +109,9 @@ describe('AdminService', () => {
       const result = await service.getPendingAdvocates();
 
       expect(result).toEqual(mockPendingAdvocates);
-      expect(db.query).toHaveBeenCalled();
+      expect(db.query).toHaveBeenCalledWith(
+        expect.stringContaining("verification_status = 'submitted'"),
+      );
     });
 
     it('should return empty array when no pending advocates', async () => {
@@ -87,7 +125,9 @@ describe('AdminService', () => {
 
   describe('verifyAdvocate', () => {
     it('should approve advocate with action=approve', async () => {
-      db.query.mockResolvedValueOnce({ rows: [{ id: 'advocate-1' }] });
+      db.query.mockResolvedValueOnce({
+        rows: [{ id: 'advocate-1', name: 'John Doe', user_email: 'john.user@example.com' }],
+      });
       db.query.mockResolvedValueOnce({ rows: [] });
 
       const result = await service.verifyAdvocate('advocate-1', 'approve');
@@ -101,27 +141,45 @@ describe('AdminService', () => {
         expect.stringContaining('UPDATE advocates SET verification_status'),
         ['verified', 'advocate-1'],
       );
+      expect(emailService.sendAdvocateVerified).toHaveBeenCalledWith(
+        'john.user@example.com',
+        'John Doe',
+      );
     });
 
     it('should reject advocate with action=reject', async () => {
-      db.query.mockResolvedValueOnce({ rows: [{ id: 'advocate-1' }] });
+      db.query.mockResolvedValueOnce({
+        rows: [{ id: 'advocate-1', name: 'John Doe', user_email: 'john.user@example.com' }],
+      });
       db.query.mockResolvedValueOnce({ rows: [] });
 
-      const result = await service.verifyAdvocate('advocate-1', 'reject');
+      const result = await service.verifyAdvocate(
+        'advocate-1',
+        'reject',
+        'Invalid documents',
+      );
 
       expect(result).toEqual({
         advocateId: 'advocate-1',
         verificationStatus: 'rejected',
+        reason: 'Invalid documents',
       });
       expect(db.query).toHaveBeenNthCalledWith(
         2,
         expect.stringContaining('UPDATE advocates SET verification_status'),
         ['rejected', 'advocate-1'],
       );
+      expect(emailService.sendAdvocateRejected).toHaveBeenCalledWith(
+        'john.user@example.com',
+        'John Doe',
+        'Invalid documents',
+      );
     });
 
     it('should include reason when provided', async () => {
-      db.query.mockResolvedValueOnce({ rows: [{ id: 'advocate-1' }] });
+      db.query.mockResolvedValueOnce({
+        rows: [{ id: 'advocate-1', name: 'John Doe', user_email: 'john.user@example.com' }],
+      });
       db.query.mockResolvedValueOnce({ rows: [] });
 
       const result = await service.verifyAdvocate(
@@ -137,11 +195,90 @@ describe('AdminService', () => {
       });
     });
 
+    it('should throw BadRequestException when reject has no reason', async () => {
+      db.query.mockResolvedValueOnce({
+        rows: [{ id: 'advocate-1', name: 'John Doe', user_email: 'john.user@example.com' }],
+      });
+
+      await expect(
+        service.verifyAdvocate('advocate-1', 'reject', '   '),
+      ).rejects.toThrow(BadRequestException);
+    });
+
     it('should throw NotFoundException for non-existent advocate', async () => {
       db.query.mockResolvedValueOnce({ rows: [] });
 
       await expect(
         service.verifyAdvocate('non-existent-id', 'approve'),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('getFlaggedMessages', () => {
+    it('should return list of flagged messages', async () => {
+      db.query.mockResolvedValueOnce({ rows: mockFlaggedMessages });
+
+      const result = await service.getFlaggedMessages();
+
+      expect(result).toEqual(mockFlaggedMessages);
+      expect(db.query).toHaveBeenCalledWith(
+        expect.stringContaining("moderation_status = 'flagged'"),
+      );
+    });
+  });
+
+  describe('updateMessageStatus', () => {
+    const messageRow = {
+      message_id: 'msg-1',
+      request_id: 'req-1',
+      sender_type: 'client',
+      sender_id: 'user-1',
+      content: 'hello world',
+      created_at: new Date(),
+    };
+
+    it('should clear and emit on approve', async () => {
+      db.query.mockResolvedValueOnce({ rows: [messageRow] });
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      const result = await service.updateMessageStatus('msg-1', 'approve');
+
+      expect(result).toEqual({
+        messageId: 'msg-1',
+        moderationStatus: 'cleared',
+        action: 'approve',
+      });
+      expect(conversationGateway.emitClearedMessage).toHaveBeenCalledWith(
+        'req-1',
+        expect.objectContaining({
+          messageId: 'msg-1',
+          senderType: 'client',
+          senderId: 'user-1',
+          text: 'hello world',
+          moderationStatus: 'cleared',
+        }),
+      );
+    });
+
+    it('should dismiss without emitting on dismiss', async () => {
+      db.query.mockResolvedValueOnce({ rows: [messageRow] });
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      const result = await service.updateMessageStatus('msg-1', 'dismiss');
+
+      expect(result).toEqual({
+        messageId: 'msg-1',
+        moderationStatus: 'dismissed',
+        action: 'dismiss',
+      });
+      expect(conversationGateway.emitClearedMessage).not.toHaveBeenCalled();
+    });
+
+    it('should throw NotFoundException for non-existent message', async () => {
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      await expect(
+        service.updateMessageStatus('non-existent', 'approve'),
       ).rejects.toThrow(NotFoundException);
     });
   });

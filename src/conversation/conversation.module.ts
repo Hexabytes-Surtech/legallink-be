@@ -11,5 +11,6 @@ import { ModerationModule } from '../moderation/moderation.module';
     JwtModule.register({}), // secrets resolved per-call via ConfigService
   ],
   providers: [ConversationGateway],
+  exports: [ConversationGateway], // AdminModule injects this for C-3 live message broadcast
 })
 export class ConversationModule {}

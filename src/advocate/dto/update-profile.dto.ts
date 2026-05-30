@@ -1,17 +1,24 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { IsArray, IsEmail, IsOptional, IsString, MaxLength } from 'class-validator';
 
 // All fields are optional — partial updates using dynamic SET clause
 export class UpdateProfileDto {
   @ApiProperty({ example: 'Anirban Sen', required: false })
+  @IsOptional()
+  @IsString()
   name?: string;
 
   @ApiProperty({
     example: '12, Park Street, Kolkata - 700016',
     required: false,
   })
+  @IsOptional()
+  @IsString()
   address?: string;
 
   @ApiProperty({ example: '+919876543210', required: false })
+  @IsOptional()
+  @IsString()
   phone?: string;
 
   @ApiProperty({
@@ -19,6 +26,8 @@ export class UpdateProfileDto {
     example: 'advocate@example.com',
     required: false,
   })
+  @IsOptional()
+  @IsEmail()
   email?: string;
 
   @ApiProperty({
@@ -26,6 +35,8 @@ export class UpdateProfileDto {
     example: 'WB/1234/2018',
     required: false,
   })
+  @IsOptional()
+  @IsString()
   barEnrolmentNumber?: string;
 
   @ApiProperty({
@@ -33,6 +44,8 @@ export class UpdateProfileDto {
     example: 'West Bengal',
     required: false,
   })
+  @IsOptional()
+  @IsString()
   stateBar?: string;
 
   @ApiProperty({
@@ -41,6 +54,9 @@ export class UpdateProfileDto {
     type: [String],
     required: false,
   })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
   practiceAreas?: string[];
 
   @ApiProperty({
@@ -49,6 +65,9 @@ export class UpdateProfileDto {
     type: [String],
     required: false,
   })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
   courts?: string[];
 
   @ApiProperty({
@@ -57,6 +76,9 @@ export class UpdateProfileDto {
     type: [String],
     required: false,
   })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
   languages?: string[];
 
   @ApiProperty({
@@ -65,6 +87,9 @@ export class UpdateProfileDto {
     type: [String],
     required: false,
   })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
   districts?: string[];
 
   @ApiProperty({
@@ -72,5 +97,8 @@ export class UpdateProfileDto {
     example: 'Specialising in tenancy and property disputes with 6 years of practice at Calcutta High Court.',
     required: false,
   })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
   bio?: string;
 }

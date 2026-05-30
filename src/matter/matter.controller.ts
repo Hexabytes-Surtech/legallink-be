@@ -4,6 +4,7 @@ import {
   Get,
   Body,
   Param,
+  ParseUUIDPipe,
   Query,
   UseGuards,
   UploadedFile,
@@ -64,7 +65,7 @@ export class MatterController {
   @ApiResponse({ status: 200, description: 'Matter detail' })
   @ApiResponse({ status: 404, description: 'MATTER_NOT_FOUND' })
   async getMatter(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: any,
     @AnonymousSessionId() sessionId?: string,
   ) {
@@ -89,7 +90,7 @@ export class MatterController {
   @ApiResponse({ status: 400, description: 'FILE_REQUIRED | FILE_TOO_LARGE | UNSUPPORTED_FILE_TYPE' })
   @ApiResponse({ status: 404, description: 'MATTER_NOT_FOUND' })
   async uploadDocument(
-    @Param('id') matterId: string,
+    @Param('id', ParseUUIDPipe) matterId: string,
     @UploadedFile() file: Express.Multer.File,
     @CurrentUser() user: any,
   ) {
@@ -105,7 +106,7 @@ export class MatterController {
   @ApiQuery({ name: 'limit', required: false, example: 5 })
   @ApiResponse({ status: 200, description: 'Paginated advocate matches' })
   async getAdvocates(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Query('page') page = '1',
     @Query('limit') limit = '5',
     @CurrentUser() user?: any,

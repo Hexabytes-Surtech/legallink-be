@@ -63,6 +63,7 @@ describe('IdentityController', () => {
   describe('verifyOtp', () => {
     it('should call verifyOtp service with email and otp', async () => {
       const mockResponse = {};
+      const mockRequest = { anonymousSessionId: 'sess-abc' };
       const expectedResult = {
         accessToken: 'jwt-token',
         user: {
@@ -74,13 +75,18 @@ describe('IdentityController', () => {
       service.verifyOtp.mockResolvedValue(expectedResult);
 
       const dto = { email: 'test@example.com', otp: '123456' };
-      const result = await controller.verifyOtp(dto, mockResponse as any);
+      const result = await controller.verifyOtp(
+        dto,
+        mockResponse as any,
+        mockRequest as any,
+      );
 
       expect(result).toEqual(expectedResult);
       expect(service.verifyOtp).toHaveBeenCalledWith(
         'test@example.com',
         '123456',
         mockResponse,
+        mockRequest,
       );
     });
   });
