@@ -313,13 +313,14 @@ export class MatterService {
     }
 
     const rawMatterType: string = matter.classification_json?.matterType ?? 'general';
-    // BUG-7: Map AI-returned matterType to the practice_area label stored on advocates.
-    const matterType: string = MATTER_TYPE_TO_PRACTICE_AREA[rawMatterType.toLowerCase()] ?? rawMatterType;
+    const canonicalLabel: string = MATTER_TYPE_TO_PRACTICE_AREA[rawMatterType.toLowerCase()] ?? rawMatterType;
+    // Pass both raw and canonical so advocates stored with either form are matched.
+    const candidateTerms = [...new Set([rawMatterType.toLowerCase(), canonicalLabel])];
     const district: string | null = matter.jurisdiction_district ?? null;
     const language: string = matter.intake_language ?? 'en';
 
     const offset = (page - 1) * limit;
-    const advocates = await this.matching.matchAdvocates(matterType, district, language, limit + offset);
+    const advocates = await this.matching.matchAdvocates(candidateTerms, district, language, limit + offset);
     const paginated = advocates.slice(offset, offset + limit);
 
     return {
