@@ -2,6 +2,18 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Resend } from 'resend';
 
+// Escape values that originate from user/advocate input before embedding them in
+// HTML emails — otherwise an advocate name / decline reason like
+// `<a href="https://evil">click</a>` becomes live markup in a LegalLink-branded mail.
+function esc(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
@@ -21,16 +33,16 @@ export class EmailService {
     await this.send(
       to,
       'LegalLink — Your account has been verified',
-      `<p>Hi ${advocateName},</p><p>Congratulations! Your advocate profile on LegalLink has been <strong>verified</strong>. You can now accept consultation requests from citizens.</p>`,
+      `<p>Hi ${esc(advocateName)},</p><p>Congratulations! Your advocate profile on LegalLink has been <strong>verified</strong>. You can now accept consultation requests from citizens.</p>`,
     );
   }
 
   async sendAdvocateRejected(to: string, advocateName: string, reason?: string): Promise<void> {
-    const reasonLine = reason ? `<p><strong>Reason:</strong> ${reason}</p>` : '';
+    const reasonLine = reason ? `<p><strong>Reason:</strong> ${esc(reason)}</p>` : '';
     await this.send(
       to,
       'LegalLink — Verification update',
-      `<p>Hi ${advocateName},</p><p>Your verification request on LegalLink was <strong>not approved</strong> at this time.</p>${reasonLine}<p>Please update your profile and re-submit when ready.</p>`,
+      `<p>Hi ${esc(advocateName)},</p><p>Your verification request on LegalLink was <strong>not approved</strong> at this time.</p>${reasonLine}<p>Please update your profile and re-submit when ready.</p>`,
     );
   }
 
@@ -38,16 +50,16 @@ export class EmailService {
     await this.send(
       to,
       'LegalLink — Your consultation has been accepted',
-      `<p>Your consultation request has been <strong>accepted</strong> by <strong>${advocateName}</strong>.</p><p><em>${matterSummary}</em></p><p>Log in to LegalLink to start chatting.</p>`,
+      `<p>Your consultation request has been <strong>accepted</strong> by <strong>${esc(advocateName)}</strong>.</p><p><em>${esc(matterSummary)}</em></p><p>Log in to LegalLink to start chatting.</p>`,
     );
   }
 
   async sendConsultationDeclined(to: string, advocateName: string, reason?: string): Promise<void> {
-    const reasonLine = reason ? `<p><strong>Reason:</strong> ${reason}</p>` : '';
+    const reasonLine = reason ? `<p><strong>Reason:</strong> ${esc(reason)}</p>` : '';
     await this.send(
       to,
       'LegalLink — Consultation update',
-      `<p>Your consultation request was <strong>declined</strong> by <strong>${advocateName}</strong>.</p>${reasonLine}<p>You can request a consultation with another advocate on LegalLink.</p>`,
+      `<p>Your consultation request was <strong>declined</strong> by <strong>${esc(advocateName)}</strong>.</p>${reasonLine}<p>You can request a consultation with another advocate on LegalLink.</p>`,
     );
   }
 

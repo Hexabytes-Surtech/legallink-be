@@ -303,7 +303,11 @@ export class MatterService {
     limit = 5,
     sessionId: string | null = null,
   ) {
-    if (limit > 20) limit = 20;
+    // The controller forwards Number(query) which is NaN for ?page=abc / ?limit=abc.
+    // NaN > 20 is false, so the old `if (limit > 20)` clamp let NaN reach the SQL
+    // LIMIT and Postgres 500'd. Coerce to safe positive integers here.
+    page = Number.isFinite(page) && page >= 1 ? Math.floor(page) : 1;
+    limit = Number.isFinite(limit) && limit >= 1 ? Math.min(20, Math.floor(limit)) : 5;
 
     const matterResult = await this.db.query(
       `SELECT matter_id, citizen_id, session_id, classification_json, jurisdiction_district,
@@ -329,18 +333,34 @@ export class MatterService {
     const canonicalLabel: string = MATTER_TYPE_TO_PRACTICE_AREA[rawMatterType.toLowerCase()] ?? rawMatterType;
     // Pass both raw and canonical so advocates stored with either form are matched.
     const candidateTerms = [...new Set([rawMatterType.toLowerCase(), canonicalLabel])];
-    const district: string | null = matter.jurisdiction_district ?? null;
+
+    // jurisdiction_district is never written by the AI pipeline (district lives inside
+    // classification_json.location), so the district ranking boost used to be dead.
+    // Fall back to the classification value, ignoring null / "Not specified" sentinels.
+    const rawDistrict: unknown =
+      matter.jurisdiction_district ?? matter.classification_json?.location?.district ?? null;
+    const district: string | null =
+      typeof rawDistrict === 'string' &&
+      rawDistrict.trim() !== '' &&
+      rawDistrict.trim().toLowerCase() !== 'not specified'
+        ? rawDistrict.trim()
+        : null;
     const language: string = matter.intake_language ?? 'en';
 
     const offset = (page - 1) * limit;
-    const advocates = await this.matching.matchAdvocates(candidateTerms, district, language, limit + offset);
-    const paginated = advocates.slice(offset, offset + limit);
+    const { rows, total } = await this.matching.matchAdvocates(
+      candidateTerms,
+      district,
+      language,
+      limit,
+      offset,
+    );
 
     return {
-      advocates: paginated,
-      total: advocates.length,
+      advocates: rows,
+      total,
       page,
-      pages: Math.ceil(advocates.length / limit),
+      pages: Math.max(1, Math.ceil(total / limit)),
     };
   }
 }

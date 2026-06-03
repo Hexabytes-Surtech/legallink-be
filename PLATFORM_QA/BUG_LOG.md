@@ -44,3 +44,33 @@ Severity: 🔴 blocker · 🟠 major · 🟡 minor · 🔵 polish/perf/best-prac
 - **Fix:** what changed
 - **Verified:** ✅ re-ran test <ID> iteration <n+1>
 -->
+
+---
+
+## Iteration 2026-06-03 — Code-review remediation (Backend_Review.txt, 15 findings)
+
+All 15 findings re-verified against current source (some were already partly
+remediated), fixed, and — where runtime-testable — proven via live API calls
+against the migrated Neon DB. Sev: 🔴 blocker · 🟠 major · 🟡 minor.
+
+| ID | Sev | File | Fix | Verified |
+|----|-----|------|-----|----------|
+| BUG-015 | 🔴 | consultation.service.ts | Anon-matter hijack: `requestConsultation` now applies the same `session_id` check as `getMatterById` — a NULL-owner matter can only be claimed by the session that created it | ✅ live: stranger→403, legit session→201 |
+| BUG-016 | 🔴 | identity.service.ts | OTP bypass backdoor hard-gated on `NODE_ENV!=='production'` + non-empty code required | ✅ logic: prod/empty/wrong→false |
+| BUG-017 | 🔴 | consultation.service.ts + Sql/017 | Booking double-book race: partial unique index `uq_appt_advocate_slot (advocate_id, scheduled_at) WHERE status='scheduled'` + 23505 catch | ✅ live concurrent: one 201, one 409 |
+| BUG-018 | 🟠 | appointment.service.ts | Reschedule race: same index + 23505 catch | ✅ live: taken→409, free→scheduled |
+| BUG-019 | 🟠 | advocate.service.ts | Verified advocate can no longer mutate `bar_enrolment_number`/`state_bar` (credential lock) | ✅ live: change→400, bio-only→200 |
+| BUG-020 | 🟠 | identity.service.ts | OTP now `crypto.randomInt` (CSPRNG) instead of `Math.random` | ✅ live register/login; grep: 0 Math.random |
+| BUG-021 | 🟠 | availability.service.ts | `getPublicSlots` validates `from`/`to` → 400 on malformed/impossible dates (was unhandled 500) | ✅ live: abc/2026-02-30→400 |
+| BUG-022 | 🟠 | advocate.service.ts | Declining a consultation cancels its scheduled appointment (slot no longer blocked forever) | ✅ live: decline→cancelled→slot freed |
+| BUG-023 | 🟠 | matter.service.ts + matching.service.ts | Pagination total uses a real count; `page`/`limit` clamped (NaN no longer 500s) | ✅ live: ?limit=abc→200, total/pages correct |
+| BUG-024 | 🟠 | Sql/017_QaHardening.sql | `advocates.rejection_reason` committed as a migration (was manual ALTER only) | ✅ applied to Neon |
+| BUG-025 | 🟠 | advocate.service.ts | `getAdvocateByUserId` now SELECTs `rejection_reason` (+ bio) → dashboard reason no longer always null | ✅ live: rejected advocate sees reason |
+| BUG-026 | 🟡 | matter.service.ts | District ranking reads `classification_json.location.district` (ignoring null/"Not specified") | ✅ matching exercised live |
+| BUG-027 | 🟠 | advocate.service.ts | Accept/decline made atomic: `AND status='pending'` + rowCount; decline also frees the slot in one tx | ✅ live: 2nd transition→400 |
+| BUG-028 | 🟠 | conversation.gateway.ts | WS message insert wrapped in try/catch; emits `MESSAGE_SEND_FAILED` instead of silently losing the message | ✅ code |
+| BUG-029 | 🟠 | email.service.ts | Advocate-controlled name/reason HTML-escaped in all emails (link/markup injection) | ✅ logic: `<a…>`→`&lt;a…` |
+
+**Migration:** `Sql/017_QaHardening.sql` — adds `consultation_appointment.advocate_id`
+(backfilled, NOT NULL) + `uq_appt_advocate_slot` partial unique index + idempotent
+`rejection_reason`. Applied to Neon 2026-06-03.

@@ -41,37 +41,55 @@ export class MatchingService {
     district: string | null,
     language: string,
     limit = 5,
-  ): Promise<AdvocateMatch[]> {
-    // Build a flexible query: practice_areas match is required;
-    // district + language matches boost results via ordering but are not hard filters
-    // so citizens in areas with few advocates still see results.
-    const result = await this.db.query(
-      `SELECT ${CARD_COLUMNS},
-         (CASE WHEN a.districts && ARRAY[$2]::text[] THEN 1 ELSE 0 END +
-          CASE WHEN a.languages && ARRAY[$3]::text[] THEN 1 ELSE 0 END) AS relevance
-       ${CARD_JOINS}
+    offset = 0,
+  ): Promise<{ rows: AdvocateMatch[]; total: number }> {
+    // Count practice-area matches first so pagination reports the true total
+    // (the old code derived total from the truncated page → pages were wrong and
+    // the client could never page past the first window).
+    const countRes = await this.db.query(
+      `SELECT COUNT(*)::int AS total
+       FROM advocates a
        WHERE a.verification_status = 'verified'
-         AND a.practice_areas && $1::text[]
-       GROUP BY a.id, u.avatar_url
-       ORDER BY relevance DESC, a.updated_at DESC
-       LIMIT $4`,
-      [candidateTerms, district ?? '', language, limit],
+         AND a.practice_areas && $1::text[]`,
+      [candidateTerms],
     );
+    const practiceTotal: number = countRes.rows[0].total;
 
-    // If nothing matches on practice_areas, fall back to all verified advocates
-    if (!result.rows.length) {
-      const fallback = await this.db.query(
-        `SELECT ${CARD_COLUMNS}
+    if (practiceTotal > 0) {
+      // practice_areas match is required; district + language matches boost ordering
+      // but are not hard filters so citizens in thin areas still see results.
+      const result = await this.db.query(
+        `SELECT ${CARD_COLUMNS},
+           (CASE WHEN a.districts && ARRAY[$2]::text[] THEN 1 ELSE 0 END +
+            CASE WHEN a.languages && ARRAY[$3]::text[] THEN 1 ELSE 0 END) AS relevance
          ${CARD_JOINS}
          WHERE a.verification_status = 'verified'
+           AND a.practice_areas && $1::text[]
          GROUP BY a.id, u.avatar_url
-         ORDER BY a.updated_at DESC
-         LIMIT $1`,
-        [limit],
+         ORDER BY relevance DESC, a.updated_at DESC
+         LIMIT $4 OFFSET $5`,
+        [candidateTerms, district ?? '', language, limit, offset],
       );
-      return fallback.rows;
+      return {
+        rows: result.rows.map(({ relevance: _r, ...row }) => row),
+        total: practiceTotal,
+      };
     }
 
-    return result.rows.map(({ relevance: _r, ...row }) => row);
+    // Fallback: no practice match → all verified advocates (still paginated/counted).
+    const countAll = await this.db.query(
+      `SELECT COUNT(*)::int AS total FROM advocates a
+       WHERE a.verification_status = 'verified'`,
+    );
+    const fallback = await this.db.query(
+      `SELECT ${CARD_COLUMNS}
+       ${CARD_JOINS}
+       WHERE a.verification_status = 'verified'
+       GROUP BY a.id, u.avatar_url
+       ORDER BY a.updated_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset],
+    );
+    return { rows: fallback.rows, total: countAll.rows[0].total };
   }
 }

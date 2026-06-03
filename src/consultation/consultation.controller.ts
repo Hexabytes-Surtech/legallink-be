@@ -21,6 +21,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { JwtPayload } from '../common/decorators/current-user.decorator';
+import { AnonymousSessionId } from '../common/session/anonymous-session.decorator';
 
 @ApiTags('Consultation')
 @ApiBearerAuth()
@@ -40,8 +41,9 @@ export class ConsultationController {
   requestConsultation(
     @Body() dto: CreateConsultationDto,
     @CurrentUser() user: JwtPayload,
+    @AnonymousSessionId() sessionId?: string,
   ) {
-    return this.consultationService.requestConsultation(dto, user.sub);
+    return this.consultationService.requestConsultation(dto, user.sub, sessionId ?? null);
   }
 
   // Must be declared before :id to avoid route conflict
@@ -75,12 +77,10 @@ export class ConsultationController {
   }
 
   @Put(':id/close')
-  @UseGuards(RolesGuard)
-  @Roles('citizen')
-  @ApiOperation({ summary: 'Citizen closes an accepted consultation' })
+  @ApiOperation({ summary: 'Either participant (citizen or advocate) ends an accepted consultation' })
   @ApiResponse({ status: 200, description: 'Consultation closed' })
   @ApiResponse({ status: 400, description: 'Not in accepted state' })
-  @ApiResponse({ status: 404, description: 'Not found or not yours' })
+  @ApiResponse({ status: 404, description: 'Not found or not a participant' })
   closeConsultation(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: JwtPayload,

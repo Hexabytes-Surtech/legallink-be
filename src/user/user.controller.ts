@@ -7,6 +7,7 @@ import {
   UseGuards,
   UseInterceptors,
   UploadedFile,
+  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
@@ -65,7 +66,13 @@ export class UserController {
   @ApiBody({
     schema: {
       type: 'object',
-      properties: { avatar: { type: 'string', format: 'binary' } },
+      properties: {
+        avatar: { type: 'string', format: 'binary' },
+        cropX: { type: 'number' },
+        cropY: { type: 'number' },
+        cropWidth: { type: 'number' },
+        cropHeight: { type: 'number' },
+      },
     },
   })
   @ApiResponse({
@@ -75,7 +82,23 @@ export class UserController {
   uploadAvatar(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,
+    @Body() body: { cropX?: string; cropY?: string; cropWidth?: string; cropHeight?: string },
   ) {
-    return this.userService.uploadAvatar(user.sub, file);
+    if (!file) throw new BadRequestException('No avatar file provided');
+
+    // Crop rect arrives as multipart text fields alongside the file. Only honour it
+    // when all four are present and valid; otherwise store the full image.
+    const num = (v?: string) =>
+      v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : undefined;
+    const x = num(body?.cropX);
+    const y = num(body?.cropY);
+    const width = num(body?.cropWidth);
+    const height = num(body?.cropHeight);
+    const crop =
+      x !== undefined && y !== undefined && width !== undefined && height !== undefined && width > 0 && height > 0
+        ? { x, y, width, height }
+        : undefined;
+
+    return this.userService.uploadAvatar(user.sub, file, crop);
   }
 }

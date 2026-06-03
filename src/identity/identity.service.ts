@@ -11,8 +11,14 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
+import { randomInt } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 import { EmailService } from '../email/email.service';
+
+// Cryptographically-secure 6-digit OTP. randomInt is unbiased over [min, max).
+function generateOtp(): string {
+  return randomInt(100000, 1000000).toString();
+}
 
 // E-4: OTP brute-force guard. In-memory per-email tracker — fine for a single
 // instance; move to Redis/DB if the API is ever horizontally scaled.
@@ -76,7 +82,7 @@ export class IdentityService {
       throw new ConflictException('Email already registered and verified');
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = generateOtp();
     const otpHash = await bcrypt.hash(otp, 10);
     const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
@@ -116,7 +122,7 @@ export class IdentityService {
     }
 
     // Generate fresh 6-digit OTP, hash it
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = generateOtp();
     const otpHash = await bcrypt.hash(otp, 10);
     const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
@@ -152,9 +158,15 @@ export class IdentityService {
 
     // Hash-compare incoming OTP against stored hash
     if (!user.otp_code) throw new UnauthorizedException('No OTP requested');
+    // Dev-only OTP bypass. Hard-gated on NODE_ENV so a leaked BYPASS_* env in
+    // production can never become a full auth bypass. Requires a non-empty code
+    // so an empty BYPASS_OTP_CODE can't match an empty submitted otp.
+    const bypassCode = this.configService.get<string>('BYPASS_OTP_CODE');
     const bypassOtp =
+      process.env.NODE_ENV !== 'production' &&
       this.configService.get<string>('BYPASS_OTP_FOR_TESTING') === 'true' &&
-      otp === this.configService.get<string>('BYPASS_OTP_CODE');
+      !!bypassCode &&
+      otp === bypassCode;
     if (!bypassOtp) {
       const isMatch = await bcrypt.compare(otp, user.otp_code);
       if (!isMatch) {
