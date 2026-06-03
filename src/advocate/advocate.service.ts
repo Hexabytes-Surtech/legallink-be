@@ -45,7 +45,7 @@ export class AdvocateService {
       `SELECT a.id AS advocate_id, a.name, a.address, a.phone, a.email AS advocate_email,
               a.bar_enrolment_number, a.state_bar, a.bio,
               a.practice_areas, a.courts, a.languages, a.districts,
-              a.verification_status, a.created_at, a.updated_at,
+              a.verification_status, a.rejection_reason, a.created_at, a.updated_at,
               u.email AS auth_email, u.preferred_language, u.avatar_url
        FROM advocates a
        JOIN users u ON u.id = a.user_id
@@ -263,6 +263,7 @@ export class AdvocateService {
     return {
       advocateId: advocate.id,
       verificationStatus: advocate.verification_status,
+      rejectionReason: advocate.rejection_reason ?? null,
       profileCompleteness: this.calculateProfileCompleteness(advocate),
       consultationStats: stats.rows[0],
       averageRating: rating.rows[0].average_rating
