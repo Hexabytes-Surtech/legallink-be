@@ -206,6 +206,23 @@ export class MatterService {
 
     const brief = row.brief_json;
     const classification = row.classification_json;
+    const isBn = row.intake_language === 'bn';
+
+    // brief_json arrives in one of two shapes depending on which AI pipeline produced it:
+    //  • Gemini / mock — en_main_analysis, en_procedural_steps, en_next_steps,
+    //                     bn_summary, bn_procedural, bn_next_steps
+    //  • RAG service   — matter_summary (EN), bn_summary (BN), procedural_information (EN),
+    //                     missing_information (EN), relevant_laws
+    // The two schemas only overlap on bn_summary + notice, so map both with cross-schema
+    // fallbacks — otherwise the RAG path silently drops the English analysis and step cards.
+    const joinList = (v: unknown): string | null =>
+      Array.isArray(v) ? v.join('\n') : typeof v === 'string' && v.trim() ? v : null;
+    const proceduralRaw = isBn
+      ? brief?.bn_procedural
+      : (brief?.en_procedural_steps ?? brief?.procedural_information);
+    const nextStepsRaw = isBn
+      ? brief?.bn_next_steps
+      : (brief?.en_next_steps ?? brief?.missing_information);
 
     return {
       matterId: row.matter_id,
@@ -223,14 +240,10 @@ export class MatterService {
               text: c.text?.slice(0, 400) ?? '',
               citation: c.citation,
             })),
-            responseEnglish: brief.en_main_analysis ?? null,
+            responseEnglish: brief.en_main_analysis ?? brief.matter_summary ?? null,
             responseBengali: brief.bn_summary ?? null,
-            procedural: Array.isArray(row.intake_language === 'bn' ? brief.bn_procedural : brief.en_procedural_steps)
-              ? (row.intake_language === 'bn' ? brief.bn_procedural : brief.en_procedural_steps).join('\n')
-              : (row.intake_language === 'bn' ? brief.bn_procedural : brief.en_procedural_steps) ?? null,
-            nextSteps: Array.isArray(row.intake_language === 'bn' ? brief.bn_next_steps : brief.en_next_steps)
-              ? (row.intake_language === 'bn' ? brief.bn_next_steps : brief.en_next_steps).join('\n')
-              : (row.intake_language === 'bn' ? brief.bn_next_steps : brief.en_next_steps) ?? null,
+            procedural: joinList(proceduralRaw),
+            nextSteps: joinList(nextStepsRaw),
             disclaimer: brief.notice ?? DISCLAIMER,
           }
         : null,
