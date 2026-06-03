@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import type { UploadApiResponse } from 'cloudinary';
 import { DatabaseService } from '../database/database.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
@@ -51,13 +52,21 @@ export class UserService {
   }
 
   // ── API 6 — POST /api/user/avatar ─────────────────────────────────────
-  async uploadAvatar(userId: string, file: Express.Multer.File) {
-    const uploaded = await this.cloudinaryService.uploadFile(
+  // The ORIGINAL image is uploaded untouched; the optional `crop` rectangle is
+  // applied as a Cloudinary delivery transformation. No client-side canvas re-encode,
+  // so quality is preserved (the master stays exactly as the user uploaded it).
+  async uploadAvatar(
+    userId: string,
+    file: Express.Multer.File,
+    crop?: { x: number; y: number; width: number; height: number },
+  ) {
+    const uploaded = (await this.cloudinaryService.uploadFile(
       file,
       CLOUDINARY_FOLDERS.AVATARS,
       userId,
-    );
-    const avatarUrl = (uploaded as any).secure_url;
+    )) as UploadApiResponse;
+
+    const avatarUrl = this.cloudinaryService.buildAvatarUrl(uploaded, crop);
 
     await this.db.query(
       `UPDATE users SET avatar_url = $1, updated_at = now() WHERE id = $2`,

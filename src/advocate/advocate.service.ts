@@ -25,10 +25,13 @@ const PA_NORMALISE: Record<string,string> = {
 };
 function normalisePracticeAreas(areas: string[] | undefined): string[] | undefined {
   if (!areas) return undefined;
-  return areas.map(a => {
+  const mapped = areas.map(a => {
     if (CANONICAL_PRACTICE_AREAS.has(a)) return a;
     return PA_NORMALISE[a.toLowerCase()] ?? a;
   });
+  // Different slugs can collapse to the same bucket — dedupe so the stored array
+  // doesn't contain repeats (which render as duplicate badges / duplicate React keys).
+  return Array.from(new Set(mapped));
 }
 
 @Injectable()
@@ -74,6 +77,21 @@ export class AdvocateService {
   // ── API 7 — Update Advocate Profile (partial updates) ─────────────────
   async updateProfile(userId: string, dto: UpdateProfileDto) {
     const advocate = await this.getAdvocateByUserId(userId);
+
+    // Credentials that were vetted at verification (bar enrolment number + state bar)
+    // are immutable once verified — otherwise a 'verified' advocate could swap in
+    // someone else's number and the public directory would vouch for an unchecked
+    // credential. A no-op write of the same value is allowed.
+    if (advocate.verification_status === 'verified') {
+      const changingBar =
+        dto.barEnrolmentNumber !== undefined &&
+        dto.barEnrolmentNumber !== advocate.bar_enrolment_number;
+      const changingStateBar =
+        dto.stateBar !== undefined && dto.stateBar !== advocate.state_bar;
+      if (changingBar || changingStateBar) {
+        throw new BadRequestException('CREDENTIALS_LOCKED_AFTER_VERIFICATION');
+      }
+    }
 
     const setClauses: string[] = [];
     const params: any[] = [];
@@ -216,13 +234,34 @@ export class AdvocateService {
     const newStatus = action === 'accept' ? 'accepted' : 'declined';
     const advocateNote = declineReason ?? null;
 
-    // Category 4: Set citizen_read=FALSE so citizen's badge lights up.
-    await this.db.query(
-      `UPDATE consultation_request
-       SET status = $1, advocate_note = $2, citizen_read = FALSE, updated_at = NOW()
-       WHERE request_id = $3`,
-      [newStatus, advocateNote, consultationId],
-    );
+    // Atomic state transition. The `AND status = 'pending'` + rowCount check closes
+    // the accept/decline TOCTOU: a racing second request (double-click, or accept+
+    // decline race) finds status already changed and updates 0 rows, so we never
+    // send two contradictory emails or let a decline overwrite an accept.
+    const updatedRows = await this.db.withTransaction(async (q) => {
+      // Category 4: Set citizen_read=FALSE so citizen's badge lights up.
+      const upd = await q(
+        `UPDATE consultation_request
+         SET status = $1, advocate_note = $2, citizen_read = FALSE, updated_at = NOW()
+         WHERE request_id = $3 AND status = 'pending'`,
+        [newStatus, advocateNote, consultationId],
+      );
+      // C-2: declining frees any slot this request had booked, so the appointment
+      // doesn't stay 'scheduled' (and the advocate's time blocked) forever.
+      if ((upd.rowCount ?? 0) > 0 && action === 'decline') {
+        await q(
+          `UPDATE consultation_appointment
+           SET status = 'cancelled', updated_at = NOW()
+           WHERE consultation_id = $1 AND status = 'scheduled'`,
+          [consultationId],
+        );
+      }
+      return upd.rowCount ?? 0;
+    });
+
+    if (updatedRows === 0) {
+      throw new BadRequestException('Consultation is not in pending state');
+    }
 
     // Category 5: Notify citizen by email (non-fatal).
     const { citizen_email, matter_summary } = existing.rows[0];
@@ -392,9 +431,9 @@ export class AdvocateService {
   private async getAdvocateByUserId(userId: string) {
     const result = await this.db.query(
       `SELECT id, name, address, phone, email,
-              bar_enrolment_number, state_bar,
+              bar_enrolment_number, state_bar, bio,
               practice_areas, courts, languages, districts,
-              verification_status
+              verification_status, rejection_reason
        FROM advocates WHERE user_id = $1`,
       [userId],
     );

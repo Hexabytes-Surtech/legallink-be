@@ -83,6 +83,16 @@ export class AvailabilityService {
     );
     if (!advocateCheck.rows.length) throw new NotFoundException('Advocate not found');
 
+    // Validate caller-supplied dates BEFORE any IST math. Without this, a malformed
+    // ?from=abc reached istWallClockToInstant(...).toISOString() and threw a
+    // RangeError → unhandled 500 on this public, unauthenticated endpoint.
+    if (fromStr !== undefined && !this.isValidDateStr(fromStr)) {
+      throw new BadRequestException('INVALID_FROM_DATE');
+    }
+    if (toStr !== undefined && !this.isValidDateStr(toStr)) {
+      throw new BadRequestException('INVALID_TO_DATE');
+    }
+
     // Resolve date range (defaults: IST today → +6). Dates are IST calendar dates.
     const fromDate = fromStr ?? istToday();
     const toDate = toStr ?? addDays(fromDate, 6);
@@ -168,5 +178,13 @@ export class AvailabilityService {
 
   private isValidTime(t: string): boolean {
     return /^\d{2}:\d{2}$/.test(t);
+  }
+
+  // Strict YYYY-MM-DD calendar date. The round-trip via toISOString rejects
+  // impossible dates like 2026-02-30 (which would otherwise roll over to March).
+  private isValidDateStr(s: string): boolean {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+    const d = new Date(`${s}T00:00:00Z`);
+    return !isNaN(d.getTime()) && d.toISOString().startsWith(s);
   }
 }

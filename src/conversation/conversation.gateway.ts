@@ -96,17 +96,39 @@ export class ConversationGateway
 
       // Send message history on connect — shape must match the broadcast
       // 'message' event so the frontend can map both with one decoder.
-      const history = await this.db.query(
-        `SELECT message_id AS "messageId", sender_type AS "senderType",
-                sender_id AS "senderId", content AS "text",
-                moderation_status AS "moderationStatus",
-                created_at AS "timestamp"
-         FROM conversation_message
-         WHERE request_id = $1
-           AND moderation_status = 'cleared'
-         ORDER BY created_at ASC`,
-        [consultationId],
-      );
+      // Attachment-aware history. Falls back to the basic columns if migration 018
+      // (the attachment columns) hasn't been applied yet — so chat never breaks.
+      let history;
+      try {
+        history = await this.db.query(
+          `SELECT message_id AS "messageId", sender_type AS "senderType",
+                  sender_id AS "senderId", content AS "text",
+                  moderation_status AS "moderationStatus",
+                  created_at AS "timestamp",
+                  CASE WHEN deleted_at IS NULL THEN attachment_url ELSE NULL END AS "attachmentUrl",
+                  attachment_type AS "attachmentType",
+                  attachment_name AS "attachmentName",
+                  attachment_size AS "attachmentSize",
+                  (deleted_at IS NOT NULL) AS "deleted"
+           FROM conversation_message
+           WHERE request_id = $1
+             AND moderation_status = 'cleared'
+           ORDER BY created_at ASC`,
+          [consultationId],
+        );
+      } catch {
+        history = await this.db.query(
+          `SELECT message_id AS "messageId", sender_type AS "senderType",
+                  sender_id AS "senderId", content AS "text",
+                  moderation_status AS "moderationStatus",
+                  created_at AS "timestamp"
+           FROM conversation_message
+           WHERE request_id = $1
+             AND moderation_status = 'cleared'
+           ORDER BY created_at ASC`,
+          [consultationId],
+        );
+      }
 
       client.emit('history', history.rows);
       this.logger.log(`User ${payload.sub} joined consultation ${consultationId}`);
@@ -144,25 +166,38 @@ export class ConversationGateway
     const content = data.text.trim();
     const modResult = this.moderation.check(content);
 
-    const inserted = await this.db.query(
-      `INSERT INTO conversation_message
-         (matter_id, request_id, sender_type, sender_id, content,
-          moderation_status, moderation_flags)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING message_id, sender_type, sender_id, content,
-                 moderation_status, moderation_flags, created_at`,
-      [
-        client.matterId,
-        client.consultationId,
-        client.role === 'advocate' ? 'advocate' : 'citizen',
-        client.userId,
-        content,
-        modResult.status,
-        modResult.flags,
-      ],
-    );
-
-    const msg = inserted.rows[0];
+    // Guard the DB write: an unhandled rejection here used to silently swallow the
+    // message (sender saw neither the message nor an error, chat appeared to hang).
+    let msg: any;
+    try {
+      const inserted = await this.db.query(
+        `INSERT INTO conversation_message
+           (matter_id, request_id, sender_type, sender_id, content,
+            moderation_status, moderation_flags)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING message_id, sender_type, sender_id, content,
+                   moderation_status, moderation_flags, created_at`,
+        [
+          client.matterId,
+          client.consultationId,
+          client.role === 'advocate' ? 'advocate' : 'citizen',
+          client.userId,
+          content,
+          modResult.status,
+          modResult.flags,
+        ],
+      );
+      msg = inserted.rows[0];
+    } catch (err) {
+      this.logger.error(
+        `Failed to persist message for consultation ${client.consultationId}: ${(err as Error).message}`,
+      );
+      client.emit('error', {
+        code: 'MESSAGE_SEND_FAILED',
+        message: 'Your message could not be sent. Please try again.',
+      });
+      return;
+    }
 
     if (modResult.status === 'flagged') {
       // Send warning only to sender; message is not broadcast
@@ -204,6 +239,24 @@ export class ConversationGateway
     },
   ) {
     this.server.to(`consultation:${consultationId}`).emit('message', payload);
+  }
+
+  /** Broadcast a new message (e.g. a citizen's file attachment uploaded via REST). */
+  emitMessage(consultationId: string, payload: Record<string, unknown>) {
+    this.server.to(`consultation:${consultationId}`).emit('message', payload);
+  }
+
+  /** Tell the room a message (attachment) was removed by its owner. */
+  emitMessageDeleted(consultationId: string, messageId: string) {
+    this.server.to(`consultation:${consultationId}`).emit('message_deleted', { messageId });
+  }
+
+  /** Tell both participants the consultation was ended (by whom) → room goes read-only. */
+  emitConsultationClosed(
+    consultationId: string,
+    payload: { by: 'citizen' | 'advocate'; byName: string },
+  ) {
+    this.server.to(`consultation:${consultationId}`).emit('consultation_closed', payload);
   }
 
   // ── Typing indicator ──────────────────────────────────────────────────────

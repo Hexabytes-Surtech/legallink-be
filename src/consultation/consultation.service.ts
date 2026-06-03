@@ -6,6 +6,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
+import { ConversationGateway } from '../conversation/conversation.gateway';
 import { CreateConsultationDto } from './dto/create-consultation.dto';
 import {
   generateDaySlotKeys,
@@ -17,10 +18,17 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 @Injectable()
 export class ConsultationService {
-  constructor(private db: DatabaseService) {}
+  constructor(
+    private db: DatabaseService,
+    private gateway: ConversationGateway,
+  ) {}
 
   // ── POST /api/consultations ───────────────────────────────────────────────
-  async requestConsultation(dto: CreateConsultationDto, citizenUserId: string) {
+  async requestConsultation(
+    dto: CreateConsultationDto,
+    citizenUserId: string,
+    sessionId: string | null = null,
+  ) {
     // Input validation — bail on bad UUIDs with 400, not a 500 from PG.
     if (!dto?.matterId || !UUID_RE.test(dto.matterId)) {
       throw new BadRequestException('MATTER_ID_INVALID');
@@ -38,16 +46,28 @@ export class ConsultationService {
       if (scheduledAt <= new Date()) throw new BadRequestException('SCHEDULED_AT_MUST_BE_FUTURE');
     }
 
-    // Verify matter exists and belongs to this citizen
+    // Verify matter exists and the caller is allowed to act on it.
     const matterResult = await this.db.query(
-      `SELECT matter_id, citizen_id, status FROM matter WHERE matter_id = $1`,
+      `SELECT matter_id, citizen_id, session_id, status FROM matter WHERE matter_id = $1`,
       [dto.matterId],
     );
     if (!matterResult.rows.length) throw new NotFoundException('MATTER_NOT_FOUND');
 
     const matter = matterResult.rows[0];
-    if (matter.citizen_id && matter.citizen_id !== citizenUserId) {
-      throw new ForbiddenException('MATTER_NOT_YOURS');
+    // Access mirrors getMatterById exactly so this write path can't be looser than
+    // the read path:
+    //   • Owned matter  → caller must be the owner.
+    //   • Anonymous matter (citizen_id NULL) → caller's session cookie must match the
+    //     matter's session_id. Without this, anyone with a leaked anonymous matter URL
+    //     could claim (permanently hijack) someone else's confidential matter.
+    if (matter.citizen_id) {
+      if (matter.citizen_id !== citizenUserId) {
+        throw new ForbiddenException('MATTER_NOT_YOURS');
+      }
+    } else {
+      if (!sessionId || matter.session_id !== sessionId) {
+        throw new ForbiddenException('MATTER_NOT_YOURS');
+      }
     }
 
     // Verify advocate exists and is verified
@@ -88,6 +108,16 @@ export class ConsultationService {
       }
     }
 
+    // Once ANY advocate has accepted a consultation on this matter, the citizen is
+    // committed to that advocate until it ends — they can't shop the same matter
+    // around to others. (Declined/closed don't block; a new request is allowed then.)
+    const active = await this.db.query(
+      `SELECT request_id FROM consultation_request
+       WHERE matter_id = $1 AND status = 'accepted'`,
+      [dto.matterId],
+    );
+    if (active.rows.length) throw new ConflictException('MATTER_HAS_ACTIVE_CONSULTATION');
+
     // Prevent duplicate pending/accepted request on the same matter+advocate pair
     const existing = await this.db.query(
       `SELECT request_id FROM consultation_request
@@ -99,41 +129,52 @@ export class ConsultationService {
     // Atomically create the consultation row AND claim the matter to this citizen.
     // Pre-fix, these were two separate statements — a failure between them left the
     // matter orphaned (anonymous) while a consultation pointed at it.
-    const row = await this.db.withTransaction(async (q) => {
-      const ins = await q(
-        `INSERT INTO consultation_request
-           (matter_id, advocate_id, citizen_id, status, citizen_note)
-         VALUES ($1, $2, $3, 'pending', $4)
-         RETURNING request_id, status, matter_id, advocate_id, citizen_id, created_at`,
-        [dto.matterId, dto.advocateId, citizenUserId, dto.citizenNote ?? null],
-      );
-      if (!matter.citizen_id) {
-        await q(
-          `UPDATE matter SET citizen_id = $1 WHERE matter_id = $2`,
-          [citizenUserId, dto.matterId],
+    let row;
+    try {
+      row = await this.db.withTransaction(async (q) => {
+        const ins = await q(
+          `INSERT INTO consultation_request
+             (matter_id, advocate_id, citizen_id, status, citizen_note)
+           VALUES ($1, $2, $3, 'pending', $4)
+           RETURNING request_id, status, matter_id, advocate_id, citizen_id, created_at`,
+          [dto.matterId, dto.advocateId, citizenUserId, dto.citizenNote ?? null],
         );
-      }
-      if (scheduledAt) {
-        // B-1 collision check inside the tx: no other live booking for this
-        // advocate at the same instant. scheduled_at is timestamptz, so exact
-        // instant equality is correct.
-        const clash = await q(
-          `SELECT 1 FROM consultation_appointment ca
-           JOIN consultation_request cr ON cr.request_id = ca.consultation_id
-           WHERE cr.advocate_id = $1 AND ca.scheduled_at = $2 AND ca.status = 'scheduled'`,
-          [dto.advocateId, scheduledAt.toISOString()],
-        );
-        if (clash.rows.length) {
-          throw new ConflictException('SLOT_ALREADY_BOOKED');
+        if (!matter.citizen_id) {
+          await q(
+            `UPDATE matter SET citizen_id = $1 WHERE matter_id = $2`,
+            [citizenUserId, dto.matterId],
+          );
         }
-        await q(
-          `INSERT INTO consultation_appointment (consultation_id, scheduled_at)
-           VALUES ($1, $2)`,
-          [ins.rows[0].request_id, scheduledAt.toISOString()],
-        );
+        if (scheduledAt) {
+          // B-1 collision check inside the tx: a friendly fast-path that returns a
+          // clean 409 in the common case. The real atomicity guarantee is the
+          // partial unique index uq_appt_advocate_slot (advocate_id, scheduled_at)
+          // WHERE status='scheduled' — under READ COMMITTED two concurrent bookings
+          // both see zero rows here, but only one INSERT can win the index.
+          const clash = await q(
+            `SELECT 1 FROM consultation_appointment ca
+             WHERE ca.advocate_id = $1 AND ca.scheduled_at = $2 AND ca.status = 'scheduled'`,
+            [dto.advocateId, scheduledAt.toISOString()],
+          );
+          if (clash.rows.length) {
+            throw new ConflictException('SLOT_ALREADY_BOOKED');
+          }
+          await q(
+            `INSERT INTO consultation_appointment (consultation_id, advocate_id, scheduled_at)
+             VALUES ($1, $2, $3)`,
+            [ins.rows[0].request_id, dto.advocateId, scheduledAt.toISOString()],
+          );
+        }
+        return ins.rows[0];
+      });
+    } catch (err: any) {
+      // 23505 here can only be the slot index losing the race (consultation_id is
+      // freshly generated, so its unique key can't collide) → surface as 409.
+      if (err?.code === '23505') {
+        throw new ConflictException('SLOT_ALREADY_BOOKED');
       }
-      return ins.rows[0];
-    });
+      throw err;
+    }
 
     return {
       consultationId: row.request_id,
@@ -223,15 +264,26 @@ export class ConsultationService {
   }
 
   // ── PUT /api/consultations/:id/close ─────────────────────────────────────
-  async closeConsultation(consultationId: string, citizenUserId: string) {
+  // Either participant (citizen OR advocate) may end an accepted consultation —
+  // symmetric, so the advocate isn't powerless if a citizen tries to cut them off.
+  // Both sides are live-notified who ended it and the room becomes read-only.
+  async closeConsultation(consultationId: string, userId: string) {
     const existing = await this.db.query(
-      `SELECT request_id, status, citizen_id FROM consultation_request WHERE request_id = $1`,
+      `SELECT cr.request_id, cr.status, cr.citizen_id, cr.advocate_id,
+              a.user_id AS advocate_user_id, a.name AS advocate_name,
+              u.name AS citizen_name
+       FROM consultation_request cr
+       JOIN advocates a ON a.id = cr.advocate_id
+       LEFT JOIN users u ON u.id = cr.citizen_id
+       WHERE cr.request_id = $1`,
       [consultationId],
     );
     if (!existing.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
 
     const row = existing.rows[0];
-    if (row.citizen_id !== citizenUserId) throw new NotFoundException('CONSULTATION_NOT_FOUND');
+    const isCitizen = row.citizen_id === userId;
+    const isAdvocate = row.advocate_user_id === userId;
+    if (!isCitizen && !isAdvocate) throw new NotFoundException('CONSULTATION_NOT_FOUND');
     if (row.status !== 'accepted') {
       throw new BadRequestException('Only accepted consultations can be closed');
     }
@@ -254,6 +306,12 @@ export class ConsultationService {
       );
     });
 
-    return { consultationId, status: 'closed' };
+    const by: 'citizen' | 'advocate' = isCitizen ? 'citizen' : 'advocate';
+    const byName = isCitizen
+      ? (row.citizen_name || 'The citizen')
+      : (row.advocate_name || 'The advocate');
+    this.gateway.emitConsultationClosed(consultationId, { by, byName });
+
+    return { consultationId, status: 'closed', by };
   }
 }

@@ -5,4 +5,5 @@ export const CLOUDINARY_FOLDERS = {
   AVATARS: 'legallink/avatars',
   ADVOCATE_DOCUMENTS: 'legallink/documents/advocate-verification',
   CITIZEN_DOCUMENTS: 'legallink/documents/citizen-matters',
+  CHAT_ATTACHMENTS: 'legallink/chat-attachments',
 } as const;

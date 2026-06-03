@@ -108,11 +108,13 @@ export class AppointmentService {
         throw new BadRequestException('SLOT_NOT_AVAILABLE');
       }
 
-      // Collision: no other live booking for this advocate at the new instant.
+      // Collision: friendly fast-path. The atomic guarantee is the partial unique
+      // index uq_appt_advocate_slot — two concurrent reschedules into the same slot
+      // both pass this SELECT under READ COMMITTED, but only one UPDATE can win the
+      // index; the loser's 23505 is caught below.
       const clash = await this.db.query(
         `SELECT 1 FROM consultation_appointment ca
-         JOIN consultation_request cr ON cr.request_id = ca.consultation_id
-         WHERE cr.advocate_id = $1 AND ca.scheduled_at = $2
+         WHERE ca.advocate_id = $1 AND ca.scheduled_at = $2
            AND ca.status = 'scheduled' AND ca.id <> $3`,
         [appt.advocate_id, newTime.toISOString(), appointmentId],
       );
@@ -120,12 +122,19 @@ export class AppointmentService {
         throw new ConflictException('SLOT_ALREADY_BOOKED');
       }
 
-      await this.db.query(
-        `UPDATE consultation_appointment
-         SET scheduled_at = $1, status = 'scheduled', updated_at = NOW()
-         WHERE id = $2`,
-        [newTime.toISOString(), appointmentId],
-      );
+      try {
+        await this.db.query(
+          `UPDATE consultation_appointment
+           SET scheduled_at = $1, status = 'scheduled', updated_at = NOW()
+           WHERE id = $2`,
+          [newTime.toISOString(), appointmentId],
+        );
+      } catch (err: any) {
+        if (err?.code === '23505') {
+          throw new ConflictException('SLOT_ALREADY_BOOKED');
+        }
+        throw err;
+      }
       return {
         appointmentId,
         status: 'scheduled',
