@@ -16,6 +16,7 @@ import {
 } from '@nestjs/swagger';
 import { ConsultationService } from './consultation.service';
 import { CreateConsultationDto } from './dto/create-consultation.dto';
+import { ReportCitizenDto } from './dto/report-citizen.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -77,14 +78,34 @@ export class ConsultationController {
   }
 
   @Put(':id/close')
-  @ApiOperation({ summary: 'Either participant (citizen or advocate) ends an accepted consultation' })
+  @UseGuards(RolesGuard)
+  @Roles('citizen')
+  @ApiOperation({ summary: 'Citizen ends an accepted consultation (citizen-only)' })
   @ApiResponse({ status: 200, description: 'Consultation closed' })
   @ApiResponse({ status: 400, description: 'Not in accepted state' })
-  @ApiResponse({ status: 404, description: 'Not found or not a participant' })
+  @ApiResponse({ status: 403, description: 'Only the citizen may close' })
+  @ApiResponse({ status: 404, description: 'Not found' })
   closeConsultation(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: JwtPayload,
   ) {
     return this.consultationService.closeConsultation(id, user.sub);
+  }
+
+  // Advocate-only: report the citizen on a closed consultation (one per consultation).
+  @Post(':id/report')
+  @UseGuards(RolesGuard)
+  @Roles('advocate')
+  @ApiOperation({ summary: 'Advocate reports the citizen on a closed consultation' })
+  @ApiResponse({ status: 201, description: 'Report filed' })
+  @ApiResponse({ status: 400, description: 'Consultation not closed' })
+  @ApiResponse({ status: 404, description: 'Not found or not the advocate on it' })
+  @ApiResponse({ status: 409, description: 'Already reported' })
+  reportCitizen(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReportCitizenDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.consultationService.reportCitizen(id, user.sub, dto);
   }
 }

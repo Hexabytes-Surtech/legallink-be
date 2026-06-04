@@ -8,6 +8,7 @@ import {
 import { DatabaseService } from '../database/database.service';
 import { ConversationGateway } from '../conversation/conversation.gateway';
 import { CreateConsultationDto } from './dto/create-consultation.dto';
+import { ReportCitizenDto } from './dto/report-citizen.dto';
 import {
   generateDaySlotKeys,
   instantToIstKey,
@@ -209,11 +210,14 @@ export class ConsultationService {
     );
     if (!result.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
 
-    // Category 4: Mark as read when citizen fetches this consultation
+    // Mark as read when the citizen opens this consultation: flip the activity flag
+    // AND advance the read position so the numeric unread badge clears.
     const row = result.rows[0];
-    if (row.citizenId === userId && !row.citizenRead) {
+    if (row.citizenId === userId) {
       await this.db.query(
-        `UPDATE consultation_request SET citizen_read = TRUE WHERE request_id = $1 AND citizen_id = $2`,
+        `UPDATE consultation_request
+         SET citizen_read = TRUE, citizen_last_read_at = NOW()
+         WHERE request_id = $1 AND citizen_id = $2`,
         [consultationId, userId],
       );
     }
@@ -227,6 +231,13 @@ export class ConsultationService {
       `SELECT cr.request_id AS "consultationId", cr.status,
               cr.matter_id, cr.advocate_id,
               cr.citizen_read AS "unread",
+              (SELECT COUNT(*)::int FROM conversation_message cm
+                WHERE cm.request_id = cr.request_id
+                  AND cm.sender_type = 'advocate'
+                  AND cm.deleted_at IS NULL
+                  AND cm.moderation_status = 'cleared'
+                  AND (cr.citizen_last_read_at IS NULL OR cm.created_at > cr.citizen_last_read_at)
+              ) AS "unreadCount",
               m.intake_text AS query,
               m.intake_language AS language,
               a.name AS "advocateName",
@@ -248,7 +259,8 @@ export class ConsultationService {
        ORDER BY cr.created_at DESC`,
       [citizenUserId],
     );
-    // citizen_read=TRUE means seen, so unread=FALSE means badge should show
+    // `unread` (boolean) = has new activity incl. acceptance; `unreadCount` = unseen
+    // advocate messages for the numeric badge. citizen_read=TRUE means seen.
     return result.rows.map((r) => ({ ...r, unread: r.unread === false }));
   }
 
@@ -264,9 +276,10 @@ export class ConsultationService {
   }
 
   // ── PUT /api/consultations/:id/close ─────────────────────────────────────
-  // Either participant (citizen OR advocate) may end an accepted consultation —
-  // symmetric, so the advocate isn't powerless if a citizen tries to cut them off.
-  // Both sides are live-notified who ended it and the room becomes read-only.
+  // CITIZEN-ONLY. By design, only the citizen ends a consultation; the advocate's
+  // recourse if a citizen cuts them off unfairly is to FILE A REPORT (see
+  // reportCitizen), not to close. The room then becomes read-only and the advocate
+  // is live-notified.
   async closeConsultation(consultationId: string, userId: string) {
     const existing = await this.db.query(
       `SELECT cr.request_id, cr.status, cr.citizen_id, cr.advocate_id,
@@ -281,9 +294,9 @@ export class ConsultationService {
     if (!existing.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
 
     const row = existing.rows[0];
-    const isCitizen = row.citizen_id === userId;
-    const isAdvocate = row.advocate_user_id === userId;
-    if (!isCitizen && !isAdvocate) throw new NotFoundException('CONSULTATION_NOT_FOUND');
+    // Only the citizen who owns this consultation may close it. Anyone else
+    // (including the advocate on it) gets 404 — don't reveal the consultation.
+    if (row.citizen_id !== userId) throw new NotFoundException('CONSULTATION_NOT_FOUND');
     if (row.status !== 'accepted') {
       throw new BadRequestException('Only accepted consultations can be closed');
     }
@@ -306,12 +319,66 @@ export class ConsultationService {
       );
     });
 
-    const by: 'citizen' | 'advocate' = isCitizen ? 'citizen' : 'advocate';
-    const byName = isCitizen
-      ? (row.citizen_name || 'The citizen')
-      : (row.advocate_name || 'The advocate');
+    const by = 'citizen' as const;
+    const byName = row.citizen_name || 'The citizen';
     this.gateway.emitConsultationClosed(consultationId, { by, byName });
 
     return { consultationId, status: 'closed', by };
+  }
+
+  // ── POST /api/consultations/:id/report ───────────────────────────────────
+  // Fairness counterweight to the citizen-can-close flow: once a consultation is
+  // closed, the advocate on it may file ONE report against the citizen. The report
+  // lands in the admin queue (status='open'). Advocate-only; closed-state only; the
+  // unique index on consultation_id enforces the one-report rule.
+  async reportCitizen(
+    consultationId: string,
+    userId: string,
+    dto: ReportCitizenDto,
+  ) {
+    const existing = await this.db.query(
+      `SELECT cr.request_id, cr.status, cr.citizen_id, cr.advocate_id,
+              a.user_id AS advocate_user_id
+       FROM consultation_request cr
+       JOIN advocates a ON a.id = cr.advocate_id
+       WHERE cr.request_id = $1`,
+      [consultationId],
+    );
+    if (!existing.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
+
+    const row = existing.rows[0];
+    // Only the advocate on this consultation can report. Citizens/strangers get 404
+    // (don't reveal the consultation exists).
+    if (row.advocate_user_id !== userId) {
+      throw new NotFoundException('CONSULTATION_NOT_FOUND');
+    }
+    if (row.status !== 'closed') {
+      throw new BadRequestException('Only closed consultations can be reported');
+    }
+    if (!row.citizen_id) {
+      throw new BadRequestException('CONSULTATION_HAS_NO_CITIZEN');
+    }
+
+    try {
+      const ins = await this.db.query(
+        `INSERT INTO citizen_report
+           (consultation_id, advocate_id, citizen_id, reason, note)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, status, created_at`,
+        [consultationId, row.advocate_id, row.citizen_id, dto.reason, dto.note ?? null],
+      );
+      return {
+        reportId: ins.rows[0].id,
+        consultationId,
+        status: ins.rows[0].status,
+        createdAt: ins.rows[0].created_at,
+      };
+    } catch (err: any) {
+      // 23505 = the unique index on consultation_id → already reported.
+      if (err?.code === '23505') {
+        throw new ConflictException('CONSULTATION_ALREADY_REPORTED');
+      }
+      throw err;
+    }
   }
 }

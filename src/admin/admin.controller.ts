@@ -13,6 +13,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { VerifyAdvocateDto } from './dto/verify-advocate.dto';
 import { UpdateMessageDto } from './dto/update-message.dto';
+import { ResolveReportDto } from './dto/resolve-report.dto';
 
 @ApiTags('Admin')
 @ApiBearerAuth()
@@ -66,5 +67,28 @@ export class AdminController {
     @Body() dto: UpdateMessageDto,
   ) {
     return this.adminService.updateMessageStatus(messageId, dto.action);
+  }
+
+  // ── Citizen reports (advocate → admin) ─────────────────────────────────────
+
+  @Get('reports')
+  @ApiOperation({ summary: 'List citizen reports filed by advocates (admin only)' })
+  @ApiResponse({ status: 200, description: 'Reports returned, open first' })
+  @ApiResponse({ status: 403, description: 'Admin role required' })
+  getReports() {
+    return this.adminService.getReports();
+  }
+
+  @Put('reports/:reportId')
+  @ApiOperation({ summary: 'Resolve a citizen report — review or dismiss (admin only)' })
+  @ApiParam({ name: 'reportId', description: 'Report UUID' })
+  @ApiBody({ type: ResolveReportDto })
+  @ApiResponse({ status: 200, description: 'Report status updated' })
+  @ApiResponse({ status: 404, description: 'Report not found' })
+  resolveReport(
+    @Param('reportId', ParseUUIDPipe) reportId: string,
+    @Body() dto: ResolveReportDto,
+  ) {
+    return this.adminService.resolveReport(reportId, dto.action, dto.note);
   }
 }
