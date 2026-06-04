@@ -4,12 +4,14 @@ import { AdminService } from './admin.service';
 import { DatabaseService } from '../database/database.service';
 import { EmailService } from '../email/email.service';
 import { ConversationGateway } from '../conversation/conversation.gateway';
+import { NotificationsGateway } from '../conversation/notifications.gateway';
 
 describe('AdminService', () => {
   let service: AdminService;
   let db: jest.Mocked<DatabaseService>;
   let emailService: { sendAdvocateVerified: jest.Mock; sendAdvocateRejected: jest.Mock };
   let conversationGateway: { emitClearedMessage: jest.Mock };
+  let notifications: { emitUnreadBump: jest.Mock };
 
   const mockPendingAdvocates = [
     {
@@ -85,12 +87,17 @@ describe('AdminService', () => {
       emitClearedMessage: jest.fn(),
     };
 
+    const mockNotifications = {
+      emitUnreadBump: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdminService,
         { provide: DatabaseService, useValue: mockDb },
         { provide: EmailService, useValue: mockEmail },
         { provide: ConversationGateway, useValue: mockGateway },
+        { provide: NotificationsGateway, useValue: mockNotifications },
       ],
     }).compile();
 
@@ -98,6 +105,7 @@ describe('AdminService', () => {
     db = module.get(DatabaseService);
     emailService = module.get(EmailService);
     conversationGateway = module.get(ConversationGateway);
+    notifications = module.get(NotificationsGateway);
 
     jest.clearAllMocks();
   });
@@ -139,7 +147,7 @@ describe('AdminService', () => {
       expect(db.query).toHaveBeenNthCalledWith(
         2,
         expect.stringContaining('UPDATE advocates SET verification_status'),
-        ['verified', 'advocate-1'],
+        ['verified', null, 'advocate-1'],
       );
       expect(emailService.sendAdvocateVerified).toHaveBeenCalledWith(
         'john.user@example.com',
@@ -167,7 +175,7 @@ describe('AdminService', () => {
       expect(db.query).toHaveBeenNthCalledWith(
         2,
         expect.stringContaining('UPDATE advocates SET verification_status'),
-        ['rejected', 'advocate-1'],
+        ['rejected', 'Invalid documents', 'advocate-1'],
       );
       expect(emailService.sendAdvocateRejected).toHaveBeenCalledWith(
         'john.user@example.com',
@@ -238,8 +246,9 @@ describe('AdminService', () => {
     };
 
     it('should clear and emit on approve', async () => {
-      db.query.mockResolvedValueOnce({ rows: [messageRow] });
-      db.query.mockResolvedValueOnce({ rows: [] });
+      db.query.mockResolvedValueOnce({ rows: [messageRow] }); // SELECT existing
+      db.query.mockResolvedValueOnce({ rows: [] });            // UPDATE status
+      db.query.mockResolvedValueOnce({ rows: [{ citizen_id: 'cit-1', advocate_user_id: 'adv-1' }] }); // participants
 
       const result = await service.updateMessageStatus('msg-1', 'approve');
 
@@ -258,6 +267,8 @@ describe('AdminService', () => {
           moderationStatus: 'cleared',
         }),
       );
+      // sender is the citizen here → the advocate is the recipient that gets bumped
+      expect(notifications.emitUnreadBump).toHaveBeenCalledWith('adv-1', { consultationId: 'req-1' });
     });
 
     it('should dismiss without emitting on dismiss', async () => {

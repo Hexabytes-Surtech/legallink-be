@@ -9,6 +9,7 @@ import { DatabaseService } from '../database/database.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
 import { ConversationGateway } from './conversation.gateway';
+import { NotificationsGateway } from './notifications.gateway';
 
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 // mime → attachment_type. Only images and PDFs are allowed.
@@ -25,6 +26,7 @@ export class ConversationService {
     private db: DatabaseService,
     private cloudinary: CloudinaryService,
     private gateway: ConversationGateway,
+    private notifications: NotificationsGateway,
   ) {}
 
   // Only the citizen who owns this consultation may attach/delete files on it.
@@ -88,6 +90,17 @@ export class ConversationService {
 
     // Live-broadcast so the advocate sees it without reconnecting.
     this.gateway.emitMessage(consultationId, payload);
+
+    // Bump the advocate's notification channel so their unread badge updates live.
+    const adv = await this.db.query(
+      `SELECT a.user_id FROM consultation_request cr
+       JOIN advocates a ON a.id = cr.advocate_id
+       WHERE cr.request_id = $1`,
+      [consultationId],
+    );
+    if (adv.rows[0]?.user_id) {
+      this.notifications.emitUnreadBump(adv.rows[0].user_id, { consultationId });
+    }
     return payload;
   }
 

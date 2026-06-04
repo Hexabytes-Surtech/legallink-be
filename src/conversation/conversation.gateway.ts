@@ -13,12 +13,15 @@ import { ConfigService } from '@nestjs/config';
 import { Server, Socket } from 'socket.io';
 import { DatabaseService } from '../database/database.service';
 import { ModerationService } from '../moderation/moderation.service';
+import { NotificationsGateway } from './notifications.gateway';
 
 interface AuthenticatedSocket extends Socket {
   userId: string;
   role: string;
   consultationId: string;
   matterId: string;
+  citizenId?: string | null;       // for routing unread bumps to the other party
+  advocateUserId?: string | null;
   readOnly?: boolean; // true when the consultation is 'closed' — history viewable, writes rejected (C-1)
 }
 
@@ -49,6 +52,7 @@ export class ConversationGateway
     private jwtService: JwtService,
     private config: ConfigService,
     private moderation: ModerationService,
+    private notifications: NotificationsGateway,
   ) {}
 
   // ── Connection lifecycle ──────────────────────────────────────────────────
@@ -89,6 +93,8 @@ export class ConversationGateway
       (client as AuthenticatedSocket).role = payload.role;
       (client as AuthenticatedSocket).consultationId = consultationId;
       (client as AuthenticatedSocket).matterId = consultation.matter_id;
+      (client as AuthenticatedSocket).citizenId = consultation.citizen_id;
+      (client as AuthenticatedSocket).advocateUserId = consultation.advocate_user_id;
       // C-1: closed consultations are read-only — history is sent, but writes are rejected.
       (client as AuthenticatedSocket).readOnly = consultation.status === 'closed';
 
@@ -218,6 +224,16 @@ export class ConversationGateway
       moderationStatus: msg.moderation_status,
       timestamp: msg.created_at,
     });
+
+    // Nudge the RECIPIENT's notification channel so their conversation-list unread
+    // badge ticks up live, even if they aren't in this chat room right now.
+    const recipientUserId =
+      client.role === 'advocate' ? client.citizenId : client.advocateUserId;
+    if (recipientUserId) {
+      this.notifications.emitUnreadBump(recipientUserId, {
+        consultationId: client.consultationId,
+      });
+    }
   }
 
   // ── Server-initiated broadcast (C-3 / M-6) ─────────────────────────────────

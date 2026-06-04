@@ -178,7 +178,15 @@ export class AdvocateService {
               m.matter_id, m.intake_text AS query_text, m.intake_language AS query_language,
               m.classification_json AS classification,
               cr.citizen_id AS citizen_user_id,
-              COALESCE(u.name, 'Citizen') AS citizen_name
+              COALESCE(u.name, 'Citizen') AS citizen_name,
+              EXISTS(SELECT 1 FROM citizen_report rep WHERE rep.consultation_id = cr.request_id) AS reported,
+              (SELECT COUNT(*)::int FROM conversation_message cm
+                WHERE cm.request_id = cr.request_id
+                  AND cm.sender_type = 'citizen'
+                  AND cm.deleted_at IS NULL
+                  AND cm.moderation_status = 'cleared'
+                  AND (cr.advocate_last_read_at IS NULL OR cm.created_at > cr.advocate_last_read_at)
+              ) AS "unreadCount"
        FROM consultation_request cr
        JOIN matter m ON m.matter_id = cr.matter_id
        LEFT JOIN users u ON u.id = cr.citizen_id
@@ -207,6 +215,15 @@ export class AdvocateService {
       [consultationId, advocate.id],
     );
     if (!result.rows.length) throw new NotFoundException('Consultation not found');
+
+    // Opening the consultation marks it read for the advocate — advance the read
+    // position so their numeric unread badge for this chat clears.
+    await this.db.query(
+      `UPDATE consultation_request SET advocate_last_read_at = NOW()
+       WHERE request_id = $1 AND advocate_id = $2`,
+      [consultationId, advocate.id],
+    );
+
     return result.rows[0];
   }
 

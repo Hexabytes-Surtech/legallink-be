@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { ConversationGateway } from './conversation.gateway';
+import { NotificationsGateway } from './notifications.gateway';
 import { ConversationController } from './conversation.controller';
 import { ConversationService } from './conversation.service';
 import { DatabaseModule } from '../database/database.module';
@@ -15,7 +16,7 @@ import { CloudinaryModule } from '../cloudinary/cloudinary.module';
     JwtModule.register({}), // secrets resolved per-call via ConfigService
   ],
   controllers: [ConversationController],
-  providers: [ConversationGateway, ConversationService],
-  exports: [ConversationGateway], // AdminModule injects this for C-3 live message broadcast
+  providers: [ConversationGateway, NotificationsGateway, ConversationService],
+  exports: [ConversationGateway, NotificationsGateway], // AdminModule injects the gateway for C-3 live message broadcast
 })
 export class ConversationModule {}
