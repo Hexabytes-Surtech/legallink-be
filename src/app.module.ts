@@ -13,6 +13,7 @@ import { UserModule } from './user/user.module';
 import { AdvocateModule } from './advocate/advocate.module';
 import { AdminModule } from './admin/admin.module';
 import { AiModule } from './ai/ai.module';
+import { AiChatModule } from './ai-chat/ai-chat.module';
 import { MatchingModule } from './matching/matching.module';
 import { MatterModule } from './matter/matter.module';
 import { ConsultationModule } from './consultation/consultation.module';
@@ -39,6 +40,7 @@ import { ResponseEnvelopeInterceptor } from './common/interceptors/response-enve
     AdvocateModule,
     AdminModule,
     AiModule,
+    AiChatModule,
     MatchingModule,
     MatterModule,
     ConsultationModule,
