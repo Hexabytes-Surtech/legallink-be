@@ -1,0 +1,190 @@
+Project CitizenLegalAid {
+  database_type: 'PostgreSQL'
+  Note: 'Phase 1 minimal schema — Neon PostgreSQL, raw SQL, no ORM'
+}
+
+// -------------------------------------------------------------
+// USERS — shared auth table for citizens AND advocates
+// -------------------------------------------------------------
+Table users {
+  id                       uuid        [pk, default: `gen_random_uuid()`, note: 'Primary key']
+
+  // Identity
+  email                    varchar(255) [not null, unique, note: 'Primary identity + OTP channel']
+  email_verified           boolean      [not null, default: false]
+
+  // Role & preferences
+  role                     varchar(20)  [not null, note: 'citizen | advocate | admin']
+  preferred_language       varchar(2)   [not null, default: 'en', note: 'bn | en']
+
+  // Email OTP
+  otp_code                 varchar(6)   [null, note: 'Hashed 6-digit OTP; NULL = no pending OTP']
+  otp_expires_at           timestamptz  [null, note: 'OTP expiry; NULL = no active OTP']
+
+  // JWT
+  refresh_token            text         [null, note: 'Hashed refresh token — never store plain']
+  refresh_token_expires_at timestamptz  [null, note: 'NULL = no active session']
+
+  // Profile
+  avatar_url               text         [null, note: 'Cloudinary URL — e.g. https://res.cloudinary.com/<cloud>/image/upload/v123/avatars/<user_id>.jpg']
+
+  // Timestamps
+  created_at               timestamptz  [not null, default: `now()`]
+  updated_at               timestamptz  [not null, default: `now()`, note: 'Auto-updated by trigger']
+
+  indexes {
+    email                  [unique, name: 'idx_users_email']
+    role                   [name: 'idx_users_role']
+    refresh_token          [name: 'idx_users_refresh_token']
+  }
+
+  Note: 'Auth: email OTP → verify → issue JWT access + refresh token'
+}
+
+// -------------------------------------------------------------
+// ADVOCATES — extended profile for users with role = advocate
+// -------------------------------------------------------------
+Table advocates {
+  id                   uuid         [pk, default: `gen_random_uuid()`]
+  user_id              uuid         [not null, unique, ref: > users.id, note: 'One-to-one with users']
+
+  // BCI-permitted fields only (no bio, no years_experience)
+  bar_enrolment_number varchar(50)  [not null, unique, note: 'e.g. WB/1234/2018']
+  state_bar            varchar(100) [not null, note: 'e.g. West Bengal']
+  name                 varchar(255) [not null, note: 'As per Certificate of Practice']
+  address              text         [not null, note: 'As per Certificate of Practice']
+  email                varchar(255) [null,     note: 'Optional — may not appear on CoP']
+
+  // Array fields — use Postgres text[] with GIN indexes for fast matching
+  practice_areas       text[]       [not null, default: '{}', note: 'e.g. {traffic_offence, consumer}']
+  courts               text[]       [not null, default: '{}', note: 'e.g. {Calcutta HC, Howrah District}']
+  languages            text[]       [not null, default: '{}', note: 'e.g. {bn, en}']
+  districts            text[]       [not null, default: '{}', note: 'e.g. {howrah, kolkata}']
+
+  verification_status  varchar(20)  [not null, default: 'pending', note: 'pending | verified | rejected']
+
+  created_at           timestamptz  [not null, default: `now()`]
+  updated_at           timestamptz  [not null, default: `now()`, note: 'Auto-updated by trigger']
+
+  indexes {
+    user_id             [name: 'idx_advocates_user_id']
+    verification_status [name: 'idx_advocates_verification_status']
+    practice_areas      [name: 'idx_advocates_practice_areas', note: 'GIN index']
+    districts           [name: 'idx_advocates_districts',      note: 'GIN index']
+    languages           [name: 'idx_advocates_languages',      note: 'GIN index']
+  }
+
+  Note: 'Matching query: WHERE districts && ARRAY[district] AND practice_areas && ARRAY[area]'
+}
+
+// -------------------------------------------------------------
+// ADVOCATE VERIFICATION DOCUMENTS — Certificate of Practice upload
+// -------------------------------------------------------------
+Table advocate_verification_documents {
+  id           uuid         [pk, default: `gen_random_uuid()`]
+  advocate_id  uuid         [not null, ref: > advocates.id, note: 'CASCADE delete']
+  file_path    varchar(500) [not null, note: 'S3 / MinIO object key']
+  file_type    varchar(100) [not null, note: 'MIME type e.g. application/pdf']
+  uploaded_at  timestamptz  [not null, default: `now()`]
+
+  indexes {
+    advocate_id [name: 'idx_avd_advocate_id']
+  }
+
+  Note: 'Phase 1: one Certificate of Practice per advocate'
+}
+
+// -------------------------------------------------------------
+// MATTERS — core citizen entity; exists before login (anonymous)
+// -------------------------------------------------------------
+Table matters {
+  id                  uuid        [pk, default: `gen_random_uuid()`]
+  user_id             uuid        [null, ref: > users.id, note: 'NULL = anonymous session; set after OTP claim']
+  session_id          uuid        [null, note: 'Links anonymous session to this matter']
+
+  // Citizen query
+  query_text          text        [not null]
+  query_language      varchar(2)  [not null, note: 'bn | en']
+
+  // AI output
+  classification      jsonb       [null, note: 'Extracted fields: {type, statute, district, ...}']
+  citations           jsonb       [null, note: 'Array of citation objects']
+  ai_response_english text        [null]
+  ai_response_bengali text        [null]
+  disclaimer          text        [null]
+
+  // Lifecycle
+  status              varchar(20) [not null, default: 'session-owned', note: 'session-owned | user-owned | archived']
+  expires_at          timestamptz [null, note: 'NULL if user-owned; 24h from creation if session-owned']
+
+  created_at          timestamptz [not null, default: `now()`]
+
+  indexes {
+    user_id    [name: 'idx_matters_user_id']
+    session_id [name: 'idx_matters_session_id']
+    status     [name: 'idx_matters_status']
+    expires_at [name: 'idx_matters_expires_at', note: 'Partial index: WHERE expires_at IS NOT NULL']
+  }
+
+  Note: 'Central object of citizen flow. Anonymous-first: user_id is NULL until OTP verified'
+}
+
+// -------------------------------------------------------------
+// DOCUMENTS — citizen file uploads attached to a matter
+// -------------------------------------------------------------
+Table documents {
+  id          uuid         [pk, default: `gen_random_uuid()`]
+  matter_id   uuid         [not null, ref: > matters.id,  note: 'CASCADE delete']
+  uploader_id uuid         [not null, ref: > users.id,    note: 'RESTRICT delete']
+  file_path   varchar(500) [not null, note: 'S3 / MinIO object key']
+  file_type   varchar(100) [not null, note: 'MIME type']
+  size        int          [not null, note: 'Bytes; CHECK size > 0']
+  uploaded_at timestamptz  [not null, default: `now()`]
+
+  indexes {
+    matter_id   [name: 'idx_documents_matter_id']
+    uploader_id [name: 'idx_documents_uploader_id']
+  }
+}
+
+// -------------------------------------------------------------
+// CONSULTATIONS — links one citizen + one advocate on one matter
+// -------------------------------------------------------------
+Table consultations {
+  id           uuid        [pk, default: `gen_random_uuid()`]
+  matter_id    uuid        [not null, ref: > matters.id,    note: 'RESTRICT delete']
+  citizen_id   uuid        [not null, ref: > users.id,      note: 'RESTRICT delete']
+  advocate_id  uuid        [not null, ref: > advocates.id,  note: 'RESTRICT delete']
+  status       varchar(20) [not null, default: 'requested', note: 'requested | accepted | declined | closed']
+  requested_at timestamptz [not null, default: `now()`]
+  accepted_at  timestamptz [null, note: 'NULL until advocate accepts']
+
+  indexes {
+    matter_id   [name: 'idx_consultations_matter_id']
+    citizen_id  [name: 'idx_consultations_citizen_id']
+    advocate_id [name: 'idx_consultations_advocate_id']
+    status      [name: 'idx_consultations_status']
+  }
+
+  Note: 'One active consultation per matter at a time (enforced in app logic)'
+}
+
+// -------------------------------------------------------------
+// MESSAGES — persisted WebSocket chat messages
+// -------------------------------------------------------------
+Table messages {
+  id                uuid        [pk, default: `gen_random_uuid()`]
+  consultation_id   uuid        [not null, ref: > consultations.id, note: 'CASCADE delete']
+  sender_type       varchar(10) [not null, note: 'citizen | advocate']
+  sender_id         uuid        [not null, note: 'users.id of the sender']
+  content           text        [not null]
+  moderation_status varchar(15) [not null, default: 'pending', note: 'pending | approved | flagged — must default to pending so Rule 36 moderation hook can review before broadcast']
+  created_at        timestamptz [not null, default: `now()`]
+
+  indexes {
+    consultation_id              [name: 'idx_messages_consultation_id']
+    (consultation_id, created_at) [name: 'idx_messages_created_at']
+  }
+
+  Note: 'WebSocket messages persisted here; load on consultation open'
+}

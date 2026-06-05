@@ -1,0 +1,42 @@
+Project CitizenLegalAid_AnonymousSessions {
+  database_type: 'PostgreSQL'
+  Note: 'Phase B1 — Postgres-backed anonymous session store (no Redis). Companion to 001_Schema.dbml.'
+}
+
+// -------------------------------------------------------------
+// ANONYMOUS_SESSIONS — citizen identity before OTP signup
+// -------------------------------------------------------------
+// Lifecycle:
+//   1. First hit to /api/matter without an auth header
+//      → AnonymousSessionMiddleware mints a row here, sets `legallink_session` cookie (httpOnly, sameSite=lax)
+//   2. Subsequent anonymous requests resolve the cookie → session_id → matters.session_id
+//   3. On /auth/verify-otp, identity.service.ts performs claim-on-login:
+//        UPDATE matters SET user_id = $newUser, session_id = NULL, status = 'user-owned'
+//        WHERE session_id = $cookieSession
+//      then DELETE FROM anonymous_sessions WHERE id = $cookieSession
+//   4. Unclaimed sessions older than `expires_at` are swept by a cron job
+//
+// No PII stored here — only an opaque server-side identifier.
+// -------------------------------------------------------------
+Table anonymous_sessions {
+  id              uuid         [pk, default: `gen_random_uuid()`, note: 'Value placed inside the legallink_session cookie']
+
+  // Optional fingerprinting (helps detect cookie theft / abuse — non-authoritative)
+  user_agent      text         [null, note: 'Captured at session mint; never used for matching']
+  ip_hash         varchar(64)  [null, note: 'SHA-256 of client IP + server salt; for rate-limiting only']
+
+  // Preferences captured pre-signup (so /intake remembers Bengali vs English UI choice)
+  preferred_language varchar(2) [not null, default: 'en', note: 'bn | en']
+
+  // Lifecycle
+  last_seen_at    timestamptz  [not null, default: `now()`, note: 'Updated on every authenticated middleware hit']
+  created_at      timestamptz  [not null, default: `now()`]
+  expires_at      timestamptz  [not null, note: 'created_at + 24h — matches matters.expires_at for session-owned rows']
+
+  indexes {
+    expires_at    [name: 'idx_anon_sessions_expires_at', note: 'Sweep query: WHERE expires_at < now()']
+    last_seen_at  [name: 'idx_anon_sessions_last_seen_at']
+  }
+
+  Note: 'Referenced by matters.session_id (no FK — matters survives session deletion via claim-on-login nulling session_id first)'
+}
