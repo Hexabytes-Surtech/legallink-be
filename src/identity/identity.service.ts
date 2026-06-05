@@ -158,21 +158,10 @@ export class IdentityService {
 
     // Hash-compare incoming OTP against stored hash
     if (!user.otp_code) throw new UnauthorizedException('No OTP requested');
-    // Dev-only OTP bypass. Hard-gated on NODE_ENV so a leaked BYPASS_* env in
-    // production can never become a full auth bypass. Requires a non-empty code
-    // so an empty BYPASS_OTP_CODE can't match an empty submitted otp.
-    const bypassCode = this.configService.get<string>('BYPASS_OTP_CODE');
-    const bypassOtp =
-      process.env.NODE_ENV !== 'production' &&
-      this.configService.get<string>('BYPASS_OTP_FOR_TESTING') === 'true' &&
-      !!bypassCode &&
-      otp === bypassCode;
-    if (!bypassOtp) {
-      const isMatch = await bcrypt.compare(otp, user.otp_code);
-      if (!isMatch) {
-        this.registerFailedOtp(email); // E-4: count this failure, lock after the threshold
-        throw new UnauthorizedException('INVALID_OTP');
-      }
+    const isMatch = await bcrypt.compare(otp, user.otp_code);
+    if (!isMatch) {
+      this.registerFailedOtp(email); // E-4: count this failure, lock after the threshold
+      throw new UnauthorizedException('INVALID_OTP');
     }
 
     // E-4: successful verification resets the brute-force counter for this email.

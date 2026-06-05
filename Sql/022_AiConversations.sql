@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS ai_conversation (
   is_legal         boolean,                               -- NULL until triage decides
   ready_to_connect boolean     NOT NULL DEFAULT false,    -- AI has offered the advocate step
   question_count   integer     NOT NULL DEFAULT 0,        -- follow-ups asked (soft cap ~4-6)
+  classification_json jsonb,                              -- latest running scene metadata from the AI
+  brief_json       jsonb,                                 -- the English advocate brief, set on a 'ready' turn
   expires_at       timestamptz,                           -- now()+24h anon; NULL when claimed
   created_at       timestamptz NOT NULL DEFAULT now(),
   updated_at       timestamptz NOT NULL DEFAULT now(),
