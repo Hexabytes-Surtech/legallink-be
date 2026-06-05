@@ -93,12 +93,17 @@ export class AdvocateService {
       }
     }
 
+    // Full name is set ONCE during onboarding (while still 'pending') and is then
+    // frozen — it can never be changed afterwards (the profile page also hides it).
+    // Silently ignore any name change once the advocate has moved past 'pending'.
+    const nameLocked = advocate.verification_status !== 'pending';
+
     const setClauses: string[] = [];
     const params: any[] = [];
     let paramIndex = 1;
 
     const fieldMap: Record<string, any> = {
-      name: dto.name,
+      name: nameLocked ? undefined : dto.name,
       address: dto.address,
       phone: dto.phone,
       email: dto.email,
@@ -179,6 +184,7 @@ export class AdvocateService {
               m.classification_json AS classification,
               cr.citizen_id AS citizen_user_id,
               COALESCE(u.name, 'Citizen') AS citizen_name,
+              u.avatar_url AS citizen_avatar_url,
               EXISTS(SELECT 1 FROM citizen_report rep WHERE rep.consultation_id = cr.request_id) AS reported,
               (SELECT COUNT(*)::int FROM conversation_message cm
                 WHERE cm.request_id = cr.request_id
@@ -205,9 +211,12 @@ export class AdvocateService {
               m.matter_id, m.intake_text AS query_text, m.intake_language AS query_language,
               m.classification_json AS classification,
               mbv.brief_json,
-              cr.citizen_id AS citizen_user_id
+              cr.citizen_id AS citizen_user_id,
+              COALESCE(u.name, 'Citizen') AS citizen_name,
+              u.avatar_url AS citizen_avatar_url
        FROM consultation_request cr
        JOIN matter m ON m.matter_id = cr.matter_id
+       LEFT JOIN users u ON u.id = cr.citizen_id
        LEFT JOIN matter_brief_version mbv ON mbv.matter_id = m.matter_id
        WHERE cr.request_id = $1 AND cr.advocate_id = $2
        ORDER BY mbv.generated_at DESC
@@ -215,6 +224,7 @@ export class AdvocateService {
       [consultationId, advocate.id],
     );
     if (!result.rows.length) throw new NotFoundException('Consultation not found');
+    const row = result.rows[0];
 
     // Opening the consultation marks it read for the advocate — advance the read
     // position so their numeric unread badge for this chat clears.
@@ -224,7 +234,46 @@ export class AdvocateService {
       [consultationId, advocate.id],
     );
 
-    return result.rows[0];
+    // The raw brief_json (Gemini/RAG shape) doesn't match the frontend AiBrief's
+    // AiResponse shape — it has no `citations` and uses different keys. Normalise it
+    // the same way matter.getMatterById does so the advocate's brief renders (and
+    // doesn't crash on `citations.length`).
+    row.brief_json = await this.normaliseBrief(row.matter_id, row.brief_json, row.classification, row.query_language === 'bn');
+
+    return row;
+  }
+
+  /** Map a raw brief_json + the matter's citations into the FE AiResponse shape. */
+  private async normaliseBrief(matterId: string, brief: any, classification: any, isBn: boolean) {
+    if (!brief) return null;
+    const citationResult = await this.db.query(
+      `SELECT ldu.doc_title AS source, ldu.node_label AS section, ldu.doc_title AS title,
+              ldu.text_content AS text, ldu.citation_text AS citation
+         FROM matter_citation mc
+         JOIN legal_document_unit ldu ON ldu.unit_id = mc.unit_id
+        WHERE mc.matter_id = $1
+        ORDER BY mc.relevance_score DESC`,
+      [matterId],
+    );
+    const joinList = (v: unknown): string | null =>
+      Array.isArray(v) ? v.join('\n') : typeof v === 'string' && v.trim() ? v : null;
+    const proceduralRaw = isBn ? brief?.bn_procedural : (brief?.en_procedural_steps ?? brief?.procedural_information);
+    const nextStepsRaw = isBn ? brief?.bn_next_steps : (brief?.en_next_steps ?? brief?.missing_information);
+    return {
+      classification: classification ?? null,
+      citations: citationResult.rows.map((c) => ({
+        source: c.source,
+        section: c.section,
+        title: c.title,
+        text: c.text?.slice(0, 400) ?? '',
+        citation: c.citation,
+      })),
+      responseEnglish: brief.en_main_analysis ?? brief.matter_summary ?? null,
+      responseBengali: brief.bn_summary ?? null,
+      procedural: joinList(proceduralRaw),
+      nextSteps: joinList(nextStepsRaw),
+      disclaimer: brief.notice ?? null,
+    };
   }
 
   async updateConsultation(
@@ -429,7 +478,13 @@ export class AdvocateService {
               a.state_bar, a.verification_status, a.courts, a.bar_enrolment_number,
               u.avatar_url,
               ROUND(AVG(cf.rating)::numeric, 1) AS rating,
-              COUNT(cf.id)::int AS rating_count
+              COUNT(cf.id)::int AS rating_count,
+              -- Scalar subquery (not a join) so it can't fan out the rating AVG/COUNT.
+              (SELECT COALESCE(
+                  json_agg(json_build_object('id', d.id, 'fileUrl', d.file_path, 'fileType', d.file_type)
+                           ORDER BY d.uploaded_at DESC),
+                  '[]'::json)
+                FROM advocate_verification_documents d WHERE d.advocate_id = a.id) AS documents
        FROM advocates a
        LEFT JOIN users u ON u.id = a.user_id
        LEFT JOIN consultation_feedback cf ON cf.advocate_id = a.id AND cf.is_visible = true
@@ -440,7 +495,11 @@ export class AdvocateService {
     if (!result.rows.length) {
       throw new NotFoundException('Advocate not found');
     }
-    return result.rows[0];
+    const row = result.rows[0];
+    // Verification documents are exposed to citizens ONLY for verified advocates —
+    // they're the proven credentials behind the verification. Hidden otherwise.
+    if (row.verification_status !== 'verified') row.documents = [];
+    return row;
   }
 
   // ── Private Helpers ───────────────────────────────────────────────────

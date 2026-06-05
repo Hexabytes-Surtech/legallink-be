@@ -223,6 +223,22 @@ export class IdentityService {
             `[claim] reassigned ${claim.rowCount} matter(s) from session ${sessionId} to user ${user.id}`,
           );
         }
+
+        // Same claim for AI chats: any anonymous ai_conversation tied to this
+        // browser's session is reassigned and made permanent (expires_at = NULL).
+        const claimConv = await this.db.query(
+          `UPDATE ai_conversation
+              SET citizen_id = $1, expires_at = NULL, updated_at = now()
+            WHERE citizen_id IS NULL
+              AND session_id = $2
+          RETURNING conversation_id`,
+          [user.id, sessionId],
+        );
+        if (claimConv.rowCount && claimConv.rowCount > 0) {
+          console.log(
+            `[claim] reassigned ${claimConv.rowCount} conversation(s) from session ${sessionId} to user ${user.id}`,
+          );
+        }
       }
     }
 

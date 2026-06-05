@@ -79,7 +79,8 @@ export class FeedbackService {
 
     const comments = await this.db.query(
       `SELECT cf.id, cf.rating, cf.comment, cf.created_at,
-              COALESCE(u.name, 'Anonymous') AS citizen_name
+              COALESCE(u.name, 'Anonymous') AS citizen_name,
+              u.avatar_url AS citizen_avatar_url
        FROM consultation_feedback cf
        LEFT JOIN users u ON u.id = cf.citizen_id
        WHERE cf.advocate_id = $1 AND cf.is_visible = true
@@ -97,6 +98,7 @@ export class FeedbackService {
         rating: r.rating,
         comment: r.comment,
         citizenName: r.citizen_name,
+        citizenAvatarUrl: r.citizen_avatar_url,
         createdAt: r.created_at,
       })),
     };
@@ -121,7 +123,8 @@ export class FeedbackService {
 
     const reviews = await this.db.query(
       `SELECT cf.id, cf.rating, cf.comment, cf.is_visible, cf.created_at,
-              COALESCE(u.name, 'Anonymous') AS citizen_name
+              COALESCE(u.name, 'Anonymous') AS citizen_name,
+              u.avatar_url AS citizen_avatar_url
        FROM consultation_feedback cf
        LEFT JOIN users u ON u.id = cf.citizen_id
        WHERE cf.advocate_id = $1
@@ -140,6 +143,7 @@ export class FeedbackService {
         comment: r.comment,
         isVisible: r.is_visible,
         citizenName: r.citizen_name,
+        citizenAvatarUrl: r.citizen_avatar_url,
         createdAt: r.created_at,
       })),
     };

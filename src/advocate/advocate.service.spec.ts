@@ -51,8 +51,10 @@ describe('AdvocateService', () => {
   };
 
   beforeEach(async () => {
-    const mockDb = {
+    const mockDb: any = {
       query: jest.fn(),
+      // Run the transaction body with a `q` that delegates to the mocked query.
+      withTransaction: jest.fn((fn: any) => fn((text: string, params?: any[]) => mockDb.query(text, params))),
     };
 
     const mockCloudinaryService = {
@@ -380,7 +382,7 @@ describe('AdvocateService', () => {
       };
       db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
       db.query.mockResolvedValueOnce({ rows: [existingConsultation] });
-      db.query.mockResolvedValueOnce({ rows: [] });
+      db.query.mockResolvedValueOnce({ rows: [], rowCount: 1 }); // atomic UPDATE … status='pending'
 
       const result = await service.updateConsultation(
         'user-uuid-123',
@@ -409,7 +411,7 @@ describe('AdvocateService', () => {
       };
       db.query.mockResolvedValueOnce({ rows: [mockAdvocate] });
       db.query.mockResolvedValueOnce({ rows: [existingConsultation] });
-      db.query.mockResolvedValueOnce({ rows: [] });
+      db.query.mockResolvedValueOnce({ rows: [], rowCount: 1 }); // atomic UPDATE … status='pending'
 
       const result = await service.updateConsultation(
         'user-uuid-123',
@@ -474,6 +476,7 @@ describe('AdvocateService', () => {
       expect(result).toEqual({
         advocateId: 'advocate-uuid-123',
         verificationStatus: 'pending',
+        rejectionReason: null,
         profileCompleteness: expect.any(Number),
         consultationStats: mockStats,
         averageRating: 4.5,
