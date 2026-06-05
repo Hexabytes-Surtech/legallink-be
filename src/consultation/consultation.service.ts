@@ -241,6 +241,7 @@ export class ConsultationService {
               m.intake_text AS query,
               m.intake_language AS language,
               a.name AS "advocateName",
+              au.avatar_url AS "advocateAvatarUrl",
               a.verification_status AS "advocateVerificationStatus",
               (SELECT mbv.brief_json->>'en_main_analysis'
                FROM matter_brief_version mbv
@@ -254,6 +255,7 @@ export class ConsultationService {
        FROM consultation_request cr
        JOIN matter m ON m.matter_id = cr.matter_id
        LEFT JOIN advocates a ON a.id = cr.advocate_id
+       LEFT JOIN users au ON au.id = a.user_id
        LEFT JOIN consultation_appointment ca ON ca.consultation_id = cr.request_id
        WHERE cr.citizen_id = $1
        ORDER BY cr.created_at DESC`,

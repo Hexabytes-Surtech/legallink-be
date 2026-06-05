@@ -77,8 +77,8 @@ export class MatterService {
 
     // Only stamp session_id for anonymous matters — authenticated users own the row directly.
     const sessionForRow = citizenId ? null : sessionId;
-    // Category 1B: anonymous matters expire after 3 days; claimed matters never expire.
-    const expiresAt = citizenId ? null : new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    // Category 1B: anonymous matters expire after 24 hours; claimed matters never expire.
+    const expiresAt = citizenId ? null : new Date(Date.now() + 24 * 60 * 60 * 1000);
 
     // 1 — Create matter row in Schema B table
     const insertResult = await this.db.query(
