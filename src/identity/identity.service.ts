@@ -14,6 +14,7 @@ import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 import { EmailService } from '../email/email.service';
+import { sessionCookieOptions } from '../common/cookies';
 
 // Cryptographically-secure 6-digit OTP. randomInt is unbiased over [min, max).
 function generateOtp(): string {
@@ -246,13 +247,12 @@ export class IdentityService {
       [refreshHash, refreshExpiresAt, user.id],
     );
 
-    // Set refresh token as httpOnly cookie
+    // Set refresh token as httpOnly cookie. Cross-site aware (None;Secure in
+    // prod) so it actually rides along on the cross-site /auth/refresh-token
+    // call from the Vercel frontend to the Railway backend.
     res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'strict',
+      ...sessionCookieOptions(),
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
-      path: '/',
     });
 
     return {
@@ -274,12 +274,9 @@ export class IdentityService {
       [userId],
     );
 
-    res.clearCookie('refreshToken', {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'strict',
-      path: '/',
-    });
+    // Attributes must match those used when the cookie was set, or the browser
+    // won't clear it.
+    res.clearCookie('refreshToken', sessionCookieOptions());
 
     return { message: 'Logged out successfully' };
   }

@@ -1,6 +1,7 @@
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'crypto';
+import { sessionCookieOptions } from '../cookies';
 
 export const LEGALLINK_SESSION_COOKIE = 'legallink_session';
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -24,11 +25,8 @@ export class SessionMiddleware implements NestMiddleware {
     } else {
       sessionId = randomUUID();
       res.cookie(LEGALLINK_SESSION_COOKIE, sessionId, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
+        ...sessionCookieOptions(),
         maxAge: THIRTY_DAYS_MS,
-        path: '/',
       });
     }
 
