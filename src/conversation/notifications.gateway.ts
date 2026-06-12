@@ -26,7 +26,7 @@ import { Server, Socket } from 'socket.io';
 })
 export class NotificationsGateway implements OnGatewayConnection {
   @WebSocketServer()
-  server: Server;
+  server!: Server;
 
   private readonly logger = new Logger(NotificationsGateway.name);
 
