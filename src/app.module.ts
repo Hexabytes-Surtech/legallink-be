@@ -19,6 +19,7 @@ import { MatterModule } from './matter/matter.module';
 import { ConsultationModule } from './consultation/consultation.module';
 import { ConversationModule } from './conversation/conversation.module';
 import { CallModule } from './call/call.module';
+import { PushModule } from './push/push.module';
 import { ModerationModule } from './moderation/moderation.module';
 import { EmailModule } from './email/email.module';
 import { CleanupModule } from './cleanup/cleanup.module';
@@ -47,6 +48,7 @@ import { ResponseEnvelopeInterceptor } from './common/interceptors/response-enve
     ConsultationModule,
     ConversationModule,
     CallModule,
+    PushModule,
     ModerationModule,
     EmailModule,
     CleanupModule,

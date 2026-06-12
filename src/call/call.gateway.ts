@@ -13,6 +13,7 @@ import { ConfigService } from '@nestjs/config';
 import { Server, Socket } from 'socket.io';
 import { randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
+import { PushService } from '../push/push.service';
 
 type CallMode = 'video' | 'voice';
 
@@ -34,11 +35,16 @@ interface CallSession {
   callerSocketId: string;
   calleeSocketId: string | null;
   mode: CallMode;
+  /** Caller display info — kept so a push and a reconnect re-ring can show it. */
+  fromName: string;
+  fromAvatar: string | null;
   accepted: boolean;
   timeout: ReturnType<typeof setTimeout> | null;
 }
 
-const RING_TIMEOUT_MS = 35_000;
+// Long enough to absorb Web Push latency + a cold app start when the callee taps
+// the notification on a closed device.
+const RING_TIMEOUT_MS = 45_000;
 
 /**
  * Signaling gateway for 1:1 WebRTC video/voice calls (namespace `/call`).
@@ -80,6 +86,7 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private jwtService: JwtService,
     private config: ConfigService,
     private db: DatabaseService,
+    private push: PushService,
   ) {}
 
   // ── Connection lifecycle ──────────────────────────────────────────────────
@@ -190,6 +197,15 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
+    const fromName =
+      typeof data.fromName === 'string' && data.fromName.trim()
+        ? data.fromName.trim().slice(0, 80)
+        : 'Someone';
+    const fromAvatar =
+      typeof data.fromAvatar === 'string' && /^https?:\/\//i.test(data.fromAvatar)
+        ? data.fromAvatar.slice(0, 300)
+        : null;
+
     const callId = randomUUID();
     const session: CallSession = {
       callId,
@@ -199,6 +215,8 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
       callerSocketId: client.id,
       calleeSocketId: null,
       mode,
+      fromName,
+      fromAvatar,
       accepted: false,
       timeout: null,
     };
@@ -215,14 +233,7 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.teardown(s);
     }, RING_TIMEOUT_MS);
 
-    const fromName =
-      typeof data.fromName === 'string' && data.fromName.trim() ? data.fromName.trim().slice(0, 80) : 'Someone';
-    const fromAvatar =
-      typeof data.fromAvatar === 'string' && /^https?:\/\//i.test(data.fromAvatar)
-        ? data.fromAvatar.slice(0, 300)
-        : null;
-
-    // Ring every tab the callee has open.
+    // Ring every tab the callee has open (instant, full signaling).
     this.server.to(`user:${calleeId}`).emit('call:incoming', {
       callId,
       consultationId,
@@ -232,7 +243,40 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
       mode,
     });
     client.emit('call:ringing', { callId });
+
+    // Also fire a Web Push so a CLOSED app still rings. Best-effort and never throws;
+    // the service worker suppresses the notification if an app window is open/visible.
+    void this.push.sendToUser(calleeId, {
+      type: 'incoming-call',
+      callId,
+      consultationId,
+      mode,
+      fromName,
+      fromAvatar,
+    });
+
     this.logger.log(`Call ${callId} ringing: ${callerId} -> ${calleeId} (${mode})`);
+  }
+
+  // ── Pending check (callee re-opened the app from a push / reconnected) ──────
+
+  @SubscribeMessage('call:pending')
+  onPending(@ConnectedSocket() client: CallSocket) {
+    const userId = client.userId;
+    if (!userId) return;
+    const callId = this.activeByUser.get(userId);
+    if (!callId) return;
+    const s = this.sessions.get(callId);
+    // Only re-ring the callee of a still-ringing call (the caller keeps its own UI).
+    if (!s || s.accepted || s.calleeId !== userId) return;
+    client.emit('call:incoming', {
+      callId: s.callId,
+      consultationId: s.consultationId,
+      fromUserId: s.callerId,
+      fromName: s.fromName,
+      fromAvatar: s.fromAvatar,
+      mode: s.mode,
+    });
   }
 
   // ── Accept ──────────────────────────────────────────────────────────────
