@@ -322,6 +322,17 @@ export class AdvocateService {
           [consultationId],
         );
       }
+      // Accepting opens the case timeline at its first stage. consultation_request
+      // already defaults current_stage='consultation_started'; this seeds the matching
+      // dated event so the citizen's read-only timeline isn't empty.
+      if ((upd.rowCount ?? 0) > 0 && action === 'accept') {
+        await q(
+          `INSERT INTO consultation_timeline_event
+             (consultation_id, stage_key, actor_type, actor_id)
+           VALUES ($1, 'consultation_started', 'advocate', $2)`,
+          [consultationId, userId],
+        );
+      }
       return upd.rowCount ?? 0;
     });
 
