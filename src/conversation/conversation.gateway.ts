@@ -275,6 +275,28 @@ export class ConversationGateway
     this.server.to(`consultation:${consultationId}`).emit('consultation_closed', payload);
   }
 
+  /**
+   * Tell both participants the case timeline changed — a stage advance or the closure
+   * summary. The citizen-facing timeline panel re-fetches when this lands. Sent to the
+   * same consultation room both parties are already joined to (no extra auth path).
+   */
+  emitTimelineUpdated(
+    consultationId: string,
+    payload: {
+      currentStage: string;
+      event: {
+        eventId: string;
+        stageKey: string;
+        note: string | null;
+        actorType: string;
+        createdAt: Date | string;
+      };
+      closed?: boolean;
+    },
+  ) {
+    this.server.to(`consultation:${consultationId}`).emit('timeline_updated', payload);
+  }
+
   // ── Typing indicator ──────────────────────────────────────────────────────
 
   @SubscribeMessage('typing')
