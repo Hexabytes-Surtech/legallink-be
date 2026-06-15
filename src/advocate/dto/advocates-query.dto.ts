@@ -6,6 +6,12 @@ import { IsOptional } from 'class-validator';
 // the parsing/clamping. @IsOptional() here only ensures whitelist keeps the field.
 export class AdvocatesQueryDto {
   @ApiPropertyOptional({
+    description: 'Free-text search across name, bio, state bar, practice areas and districts',
+  })
+  @IsOptional()
+  q?: string;
+
+  @ApiPropertyOptional({
     type: [String],
     description: 'Filter by practice areas (repeat param for multiple: ?practiceArea=civil&practiceArea=family)',
   })
