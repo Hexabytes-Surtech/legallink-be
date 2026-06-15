@@ -9,6 +9,8 @@ import { DatabaseService } from '../database/database.service';
 import { ConversationGateway } from '../conversation/conversation.gateway';
 import { CreateConsultationDto } from './dto/create-consultation.dto';
 import { ReportCitizenDto } from './dto/report-citizen.dto';
+import { UpdateStageDto, TIMELINE_STAGES } from './dto/update-stage.dto';
+import { CloseConsultationDto } from './dto/close-consultation.dto';
 import {
   generateDaySlotKeys,
   instantToIstKey,
@@ -277,14 +279,164 @@ export class ConsultationService {
     return { count: result.rows[0].count };
   }
 
-  // ── PUT /api/consultations/:id/close ─────────────────────────────────────
-  // CITIZEN-ONLY. By design, only the citizen ends a consultation; the advocate's
-  // recourse if a citizen cuts them off unfairly is to FILE A REPORT (see
-  // reportCitizen), not to close. The room then becomes read-only and the advocate
-  // is live-notified.
-  async closeConsultation(consultationId: string, userId: string) {
+  // ── GET /api/consultations/:id/timeline ──────────────────────────────────
+  // Both participants. The advocate edits the timeline (PUT :id/stage and the close
+  // flow); the citizen sees it read-only on the frontend. Ownership is the same dual
+  // check getConsultation uses: own citizen_id OR own one of this user's advocate ids.
+  async getTimeline(consultationId: string, userId: string) {
+    const result = await this.db.query(
+      `SELECT cr.request_id AS "consultationId", cr.status,
+              cr.current_stage AS "currentStage",
+              cr.closure_outcome AS "closureOutcome", cr.closure_summary AS "closureSummary",
+              cr.closure_settlement AS "closureSettlement",
+              cr.closure_new_advocate AS "closureNewAdvocate",
+              cr.closure_noc_issued AS "closureNocIssued",
+              cr.closure_next_steps AS "closureNextSteps",
+              cr.documents_returned AS "documentsReturned", cr.fees_settled AS "feesSettled",
+              cr.closed_at AS "closedAt", cr.created_at AS "createdAt", cr.updated_at AS "updatedAt",
+              a.name AS "advocateName", a.bar_enrolment_number AS "barEnrolmentNumber",
+              u.name AS "citizenName"
+       FROM consultation_request cr
+       JOIN advocates a ON a.id = cr.advocate_id
+       LEFT JOIN users u ON u.id = cr.citizen_id
+       WHERE cr.request_id = $1
+         AND (cr.citizen_id = $2 OR cr.advocate_id IN (
+               SELECT id FROM advocates WHERE user_id = $2
+             ))`,
+      [consultationId, userId],
+    );
+    if (!result.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
+    const c = result.rows[0];
+
+    const ev = await this.db.query(
+      `SELECT event_id AS "eventId", stage_key AS "stageKey", note,
+              actor_type AS "actorType", created_at AS "createdAt"
+       FROM consultation_timeline_event
+       WHERE consultation_id = $1
+       ORDER BY created_at ASC, event_id ASC`,
+      [consultationId],
+    );
+    let events = ev.rows;
+    // Synthetic baseline so the read-only view is never empty for an accepted/closed
+    // consultation whose rows predate the timeline table (belt-and-braces over the
+    // 026 backfill).
+    if (!events.length && (c.status === 'accepted' || c.status === 'closed')) {
+      events = [
+        {
+          eventId: `baseline-${c.consultationId}`,
+          stageKey: 'consultation_started',
+          note: null,
+          actorType: 'system',
+          createdAt: c.updatedAt ?? c.createdAt,
+        },
+      ];
+    }
+
+    const closure =
+      c.status === 'closed'
+        ? {
+            outcomeKey: c.closureOutcome,
+            summary: c.closureSummary,
+            settlement: c.closureSettlement,
+            newAdvocate: c.closureNewAdvocate,
+            nocIssued: c.closureNocIssued,
+            nextSteps: c.closureNextSteps,
+            documentsReturned: c.documentsReturned,
+            feesSettled: c.feesSettled,
+            closedAt: c.closedAt,
+            advocateName: c.advocateName,
+            barEnrolmentNumber: c.barEnrolmentNumber,
+            citizenName: c.citizenName,
+          }
+        : null;
+
+    return {
+      consultationId: c.consultationId,
+      status: c.status,
+      currentStage: c.currentStage,
+      closure,
+      events,
+    };
+  }
+
+  // ── PUT /api/consultations/:id/stage ─────────────────────────────────────
+  // ADVOCATE-ONLY. The advocate on this consultation advances (or corrects) the case
+  // stage while it is 'accepted'. 'closed' cannot be set here — that's the close flow,
+  // which also records the closure outcome. One transaction: append a dated event +
+  // update current_stage + drop an audit breadcrumb on the matter; then live-broadcast
+  // so the citizen's read-only timeline updates without a reload.
+  async updateStage(consultationId: string, userId: string, dto: UpdateStageDto) {
+    if (!TIMELINE_STAGES.includes(dto.stageKey)) {
+      throw new BadRequestException('INVALID_STAGE');
+    }
     const existing = await this.db.query(
-      `SELECT cr.request_id, cr.status, cr.citizen_id, cr.advocate_id,
+      `SELECT cr.request_id, cr.status, cr.matter_id
+       FROM consultation_request cr
+       WHERE cr.request_id = $1
+         AND cr.advocate_id IN (SELECT id FROM advocates WHERE user_id = $2)`,
+      [consultationId, userId],
+    );
+    if (!existing.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
+    const row = existing.rows[0];
+    if (row.status !== 'accepted') {
+      throw new BadRequestException('Only accepted consultations can have their stage updated');
+    }
+
+    const event = await this.db.withTransaction(async (q) => {
+      const ins = await q(
+        `INSERT INTO consultation_timeline_event
+           (consultation_id, stage_key, note, actor_type, actor_id)
+         VALUES ($1, $2, $3, 'advocate', $4)
+         RETURNING event_id, stage_key, note, actor_type, created_at`,
+        [consultationId, dto.stageKey, dto.note?.trim() || null, userId],
+      );
+      await q(
+        `UPDATE consultation_request SET current_stage = $1, updated_at = NOW()
+         WHERE request_id = $2`,
+        [dto.stageKey, consultationId],
+      );
+      // Additive admin/audit breadcrumb (matter_event already exists, no consumers).
+      await q(
+        `INSERT INTO matter_event (matter_id, event_type, payload, actor_type)
+         VALUES ($1, 'timeline_stage_changed', $2, 'advocate')`,
+        [row.matter_id, JSON.stringify({ consultationId, stageKey: dto.stageKey })],
+      );
+      return ins.rows[0];
+    });
+
+    const payload = {
+      eventId: event.event_id,
+      stageKey: event.stage_key,
+      note: event.note,
+      actorType: event.actor_type,
+      createdAt: event.created_at,
+    };
+    this.gateway.emitTimelineUpdated(consultationId, {
+      currentStage: dto.stageKey,
+      event: payload,
+    });
+
+    return { consultationId, currentStage: dto.stageKey, event: payload };
+  }
+
+  // ── PUT /api/consultations/:id/close ─────────────────────────────────────
+  // Role-aware close.
+  //   • CITIZEN — their absolute right to withdraw/discharge: closes with the forced
+  //     outcome 'withdrawn_by_client'; summary optional. (The advocate's counterweight
+  //     to an unfair close remains reportCitizen.)
+  //   • ADVOCATE — issues the Consultation Closure Summary: must supply an outcome and a
+  //     written summary, plus optional conditional fields and the two BCI duty flags
+  //     (documents returned, fees settled).
+  // Either way the room goes read-only (consultation_closed) and the timeline gets a
+  // dated terminal 'closed' event.
+  async closeConsultation(
+    consultationId: string,
+    userId: string,
+    role: string,
+    dto: CloseConsultationDto = {},
+  ) {
+    const existing = await this.db.query(
+      `SELECT cr.request_id, cr.status, cr.matter_id, cr.citizen_id, cr.advocate_id,
               a.user_id AS advocate_user_id, a.name AS advocate_name,
               u.name AS citizen_name
        FROM consultation_request cr
@@ -296,36 +448,117 @@ export class ConsultationService {
     if (!existing.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
 
     const row = existing.rows[0];
-    // Only the citizen who owns this consultation may close it. Anyone else
-    // (including the advocate on it) gets 404 — don't reveal the consultation.
-    if (row.citizen_id !== userId) throw new NotFoundException('CONSULTATION_NOT_FOUND');
+    // Only the citizen who owns this consultation OR the advocate on it may close.
+    // Anyone else gets 404 — don't reveal the consultation.
+    const isCitizen = !!row.citizen_id && row.citizen_id === userId;
+    const isAdvocate = row.advocate_user_id === userId;
+    if (!isCitizen && !isAdvocate) throw new NotFoundException('CONSULTATION_NOT_FOUND');
     if (row.status !== 'accepted') {
       throw new BadRequestException('Only accepted consultations can be closed');
     }
 
-    // C-2: closing the consultation also completes any still-scheduled appointment,
-    // so appointment status no longer gets stuck on 'scheduled' forever. Done in one
-    // transaction with the close so the two states can't diverge.
-    await this.db.withTransaction(async (q) => {
+    // Treat as an advocate close only when the actor is the advocate (and not also the
+    // citizen, which can't happen in practice but is handled defensively).
+    const advocateClose = isAdvocate && !isCitizen;
+
+    let outcome: string;
+    let summary: string | null;
+    let settlement: string | null = null;
+    let newAdvocate: string | null = null;
+    let nocIssued: boolean | null = null;
+    let nextSteps: string | null = null;
+    let documentsReturned = false;
+    let feesSettled = false;
+
+    if (advocateClose) {
+      if (!dto.outcomeKey) throw new BadRequestException('CLOSURE_OUTCOME_REQUIRED');
+      if (!dto.summary || !dto.summary.trim()) {
+        throw new BadRequestException('CLOSURE_SUMMARY_REQUIRED');
+      }
+      outcome = dto.outcomeKey;
+      summary = dto.summary.trim();
+      settlement = dto.settlement?.trim() || null;
+      newAdvocate = dto.newAdvocate?.trim() || null;
+      nocIssued = dto.nocIssued ?? null;
+      nextSteps = dto.nextSteps?.trim() || null;
+      documentsReturned = dto.documentsReturned ?? false;
+      feesSettled = dto.feesSettled ?? false;
+    } else {
+      // Citizen withdrawal — forced outcome; an optional note is allowed.
+      outcome = 'withdrawn_by_client';
+      summary = dto.summary?.trim() || null;
+    }
+
+    const by = (advocateClose ? 'advocate' : 'citizen') as 'advocate' | 'citizen';
+    // citizen_read: TRUE when the citizen is the actor (they've seen it); FALSE on an
+    // advocate close so the citizen's list lights up with the new closure.
+    const citizenRead = by === 'citizen';
+
+    const event = await this.db.withTransaction(async (q) => {
       await q(
         `UPDATE consultation_request
-         SET status = 'closed', citizen_read = TRUE, updated_at = NOW()
+         SET status = 'closed', current_stage = 'closed', closed_at = NOW(),
+             citizen_read = $2, updated_at = NOW(),
+             closure_outcome = $3, closure_summary = $4, closure_settlement = $5,
+             closure_new_advocate = $6, closure_noc_issued = $7, closure_next_steps = $8,
+             documents_returned = $9, fees_settled = $10
          WHERE request_id = $1`,
-        [consultationId],
+        [
+          consultationId,
+          citizenRead,
+          outcome,
+          summary,
+          settlement,
+          newAdvocate,
+          nocIssued,
+          nextSteps,
+          documentsReturned,
+          feesSettled,
+        ],
       );
+      // C-2: closing also completes any still-scheduled appointment so it doesn't get
+      // stuck on 'scheduled' forever.
       await q(
         `UPDATE consultation_appointment
          SET status = 'completed', updated_at = NOW()
          WHERE consultation_id = $1 AND status = 'scheduled'`,
         [consultationId],
       );
+      // Terminal timeline event. Note stays NULL — the full summary lives in the
+      // closure columns (rendered as the Closure Summary card), not duplicated here.
+      const ins = await q(
+        `INSERT INTO consultation_timeline_event
+           (consultation_id, stage_key, note, actor_type, actor_id)
+         VALUES ($1, 'closed', NULL, $2, $3)
+         RETURNING event_id, stage_key, note, actor_type, created_at`,
+        [consultationId, by, userId],
+      );
+      await q(
+        `INSERT INTO matter_event (matter_id, event_type, payload, actor_type)
+         VALUES ($1, 'consultation_closed', $2, $3)`,
+        [row.matter_id, JSON.stringify({ consultationId, outcome, by }), by],
+      );
+      return ins.rows[0];
     });
 
-    const by = 'citizen' as const;
-    const byName = row.citizen_name || 'The citizen';
+    const byName =
+      by === 'advocate'
+        ? row.advocate_name || 'The advocate'
+        : row.citizen_name || 'The citizen';
     this.gateway.emitConsultationClosed(consultationId, { by, byName });
+    this.gateway.emitTimelineUpdated(consultationId, {
+      currentStage: 'closed',
+      event: {
+        eventId: event.event_id,
+        stageKey: event.stage_key,
+        note: event.note,
+        actorType: event.actor_type,
+        createdAt: event.created_at,
+      },
+      closed: true,
+    });
 
-    return { consultationId, status: 'closed', by };
+    return { consultationId, status: 'closed', by, outcomeKey: outcome };
   }
 
   // ── POST /api/consultations/:id/report ───────────────────────────────────
