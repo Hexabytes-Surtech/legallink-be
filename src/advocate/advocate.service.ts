@@ -443,8 +443,12 @@ export class AdvocateService {
       ? (Array.isArray(query.language) ? query.language : [query.language])
       : null;
     const district = query.district ?? null;
+    // Free-text search ($5) — matched case-insensitively against name, bio, state
+    // bar, and the practice-area / district arrays. NULL (no `q`) disables it.
+    const search =
+      typeof query.q === 'string' && query.q.trim() ? query.q.trim() : null;
 
-    const filterParams = [verifiedOnly, practiceAreas, languages, district];
+    const filterParams = [verifiedOnly, practiceAreas, languages, district, search];
 
     const rows = await this.db.query(
       `SELECT a.id, a.name, a.bio, a.practice_areas, a.languages, a.districts,
@@ -458,9 +462,15 @@ export class AdvocateService {
          AND ($2::text[] IS NULL OR a.practice_areas && $2::text[])
          AND ($3::text[] IS NULL OR a.languages && $3::text[])
          AND ($4::text IS NULL OR $4 = ANY(a.districts))
+         AND ($5::text IS NULL
+              OR a.name ILIKE '%' || $5 || '%'
+              OR a.bio ILIKE '%' || $5 || '%'
+              OR a.state_bar ILIKE '%' || $5 || '%'
+              OR EXISTS (SELECT 1 FROM unnest(a.practice_areas) pa WHERE pa ILIKE '%' || $5 || '%')
+              OR EXISTS (SELECT 1 FROM unnest(a.districts) d WHERE d ILIKE '%' || $5 || '%'))
        GROUP BY a.id, u.avatar_url
        ORDER BY (a.verification_status = 'verified') DESC, a.name ASC
-       LIMIT $5 OFFSET $6`,
+       LIMIT $6 OFFSET $7`,
       [...filterParams, limit, offset],
     );
 
@@ -470,7 +480,13 @@ export class AdvocateService {
        WHERE ($1 = false OR a.verification_status = 'verified')
          AND ($2::text[] IS NULL OR a.practice_areas && $2::text[])
          AND ($3::text[] IS NULL OR a.languages && $3::text[])
-         AND ($4::text IS NULL OR $4 = ANY(a.districts))`,
+         AND ($4::text IS NULL OR $4 = ANY(a.districts))
+         AND ($5::text IS NULL
+              OR a.name ILIKE '%' || $5 || '%'
+              OR a.bio ILIKE '%' || $5 || '%'
+              OR a.state_bar ILIKE '%' || $5 || '%'
+              OR EXISTS (SELECT 1 FROM unnest(a.practice_areas) pa WHERE pa ILIKE '%' || $5 || '%')
+              OR EXISTS (SELECT 1 FROM unnest(a.districts) d WHERE d ILIKE '%' || $5 || '%'))`,
       filterParams,
     );
 
