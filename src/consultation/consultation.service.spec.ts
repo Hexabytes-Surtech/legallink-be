@@ -67,6 +67,7 @@ describe('ConsultationService (booking safety — Group B)', () => {
       .mockResolvedValueOnce({ rows: [{ matter_id: MATTER_ID, citizen_id: CITIZEN, status: 'created' }] }) // matter
       .mockResolvedValueOnce({ rows: [{ id: ADVOCATE_ID, verification_status: 'verified' }] }) // advocate
       .mockResolvedValueOnce({ rows: [FULL_DAY_GRID] }) // grid → slot is valid
+      .mockResolvedValueOnce({ rows: [] }) // no active consultation on this matter
       .mockResolvedValueOnce({ rows: [] }); // no duplicate pending request
     // Transaction: INSERT request → then collision check returns a clash.
     withTransaction.mockImplementation(async (cb: any) => {
@@ -89,7 +90,8 @@ describe('ConsultationService (booking safety — Group B)', () => {
       .mockResolvedValueOnce({ rows: [{ matter_id: MATTER_ID, citizen_id: CITIZEN, status: 'created' }] })
       .mockResolvedValueOnce({ rows: [{ id: ADVOCATE_ID, verification_status: 'verified' }] })
       .mockResolvedValueOnce({ rows: [FULL_DAY_GRID] })
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [] }) // no active consultation on this matter
+      .mockResolvedValueOnce({ rows: [] }); // no duplicate pending request
     withTransaction.mockImplementation(async (cb: any) => {
       const q = jest
         .fn()
@@ -106,22 +108,104 @@ describe('ConsultationService (booking safety — Group B)', () => {
   });
 
   describe('closeConsultation (C-2)', () => {
-    it('marks the appointment completed in the same transaction as the close', async () => {
-      query.mockResolvedValueOnce({ rows: [{ request_id: 'req-1', status: 'accepted', citizen_id: CITIZEN }] });
-      const q = jest.fn().mockResolvedValue({ rows: [] });
+    let gateway: { emitConsultationClosed: jest.Mock; emitTimelineUpdated: jest.Mock };
+    const ADV_USER = 'adv-user-1';
+    const closedRow = {
+      request_id: 'req-1',
+      status: 'accepted',
+      matter_id: MATTER_ID,
+      citizen_id: CITIZEN,
+      advocate_id: ADVOCATE_ID,
+      advocate_user_id: ADV_USER,
+      advocate_name: 'Adv',
+      citizen_name: 'Cit',
+    };
+    const closedEventRow = {
+      rows: [{ event_id: 'ev-1', stage_key: 'closed', note: null, actor_type: 'citizen', created_at: new Date() }],
+    };
+
+    beforeEach(() => {
+      gateway = { emitConsultationClosed: jest.fn(), emitTimelineUpdated: jest.fn() };
+      service = new ConsultationService({ query, withTransaction } as any, gateway as any);
+    });
+
+    it('citizen close: completes the appointment in the same tx, forces withdrawn_by_client', async () => {
+      query.mockResolvedValueOnce({ rows: [{ ...closedRow }] });
+      const q = jest.fn().mockResolvedValue(closedEventRow);
       withTransaction.mockImplementation(async (cb: any) => cb(q));
 
-      const res = await service.closeConsultation('req-1', CITIZEN);
+      const res = await service.closeConsultation('req-1', CITIZEN, 'citizen', {});
 
-      expect(res).toEqual({ consultationId: 'req-1', status: 'closed' });
+      expect(res).toEqual({ consultationId: 'req-1', status: 'closed', by: 'citizen', outcomeKey: 'withdrawn_by_client' });
       const sqls = q.mock.calls.map((c) => c[0]).join('\n');
       expect(sqls).toContain('consultation_request');
       expect(sqls).toMatch(/consultation_appointment[\s\S]*completed/);
+      expect(gateway.emitConsultationClosed).toHaveBeenCalledWith('req-1', expect.objectContaining({ by: 'citizen' }));
     });
 
     it('refuses to close a consultation that is not accepted', async () => {
-      query.mockResolvedValueOnce({ rows: [{ request_id: 'req-1', status: 'pending', citizen_id: CITIZEN }] });
-      await expect(service.closeConsultation('req-1', CITIZEN)).rejects.toBeInstanceOf(BadRequestException);
+      query.mockResolvedValueOnce({ rows: [{ ...closedRow, status: 'pending' }] });
+      await expect(service.closeConsultation('req-1', CITIZEN, 'citizen', {})).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('advocate close requires an outcome and a summary', async () => {
+      query.mockResolvedValueOnce({ rows: [{ ...closedRow }] });
+      await expect(service.closeConsultation('req-1', ADV_USER, 'advocate', {})).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('advocate close records the chosen outcome + summary and notifies the room', async () => {
+      query.mockResolvedValueOnce({ rows: [{ ...closedRow }] });
+      const q = jest.fn().mockResolvedValue({
+        rows: [{ event_id: 'ev-1', stage_key: 'closed', note: null, actor_type: 'advocate', created_at: new Date() }],
+      });
+      withTransaction.mockImplementation(async (cb: any) => cb(q));
+
+      const res = await service.closeConsultation('req-1', ADV_USER, 'advocate', {
+        outcomeKey: 'resolved',
+        summary: 'Advice complete; deposit recoverable.',
+      } as any);
+
+      expect(res).toEqual({ consultationId: 'req-1', status: 'closed', by: 'advocate', outcomeKey: 'resolved' });
+      expect(gateway.emitConsultationClosed).toHaveBeenCalledWith('req-1', expect.objectContaining({ by: 'advocate' }));
+      expect(gateway.emitTimelineUpdated).toHaveBeenCalledWith('req-1', expect.objectContaining({ currentStage: 'closed', closed: true }));
+    });
+
+    it('rejects a stranger (neither participant) with 404', async () => {
+      query.mockResolvedValueOnce({ rows: [{ ...closedRow }] });
+      await expect(service.closeConsultation('req-1', 'stranger', 'citizen', {})).rejects.toThrow('CONSULTATION_NOT_FOUND');
+    });
+  });
+
+  describe('updateStage', () => {
+    let gateway: { emitTimelineUpdated: jest.Mock };
+    const ADV_USER = 'adv-user-1';
+
+    beforeEach(() => {
+      gateway = { emitTimelineUpdated: jest.fn() };
+      service = new ConsultationService({ query, withTransaction } as any, gateway as any);
+    });
+
+    it('advances the stage and broadcasts timeline_updated', async () => {
+      query.mockResolvedValueOnce({ rows: [{ request_id: 'req-1', status: 'accepted', matter_id: MATTER_ID }] });
+      const q = jest.fn().mockResolvedValue({
+        rows: [{ event_id: 'ev-1', stage_key: 'drafting', note: 'note', actor_type: 'advocate', created_at: new Date() }],
+      });
+      withTransaction.mockImplementation(async (cb: any) => cb(q));
+
+      const res = await service.updateStage('req-1', ADV_USER, { stageKey: 'drafting', note: 'note' } as any);
+
+      expect(res).toEqual(expect.objectContaining({ consultationId: 'req-1', currentStage: 'drafting' }));
+      expect(gateway.emitTimelineUpdated).toHaveBeenCalled();
+    });
+
+    it('rejects advancing a non-accepted consultation', async () => {
+      query.mockResolvedValueOnce({ rows: [{ request_id: 'req-1', status: 'pending', matter_id: MATTER_ID }] });
+      await expect(service.updateStage('req-1', ADV_USER, { stageKey: 'drafting' } as any)).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects the terminal "closed" stage via the stage endpoint (use the close flow)', async () => {
+      await expect(service.updateStage('req-1', ADV_USER, { stageKey: 'closed' } as any)).rejects.toBeInstanceOf(BadRequestException);
+      expect(query).not.toHaveBeenCalled();
     });
   });
 });

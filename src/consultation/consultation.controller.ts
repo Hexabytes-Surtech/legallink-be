@@ -17,6 +17,8 @@ import {
 import { ConsultationService } from './consultation.service';
 import { CreateConsultationDto } from './dto/create-consultation.dto';
 import { ReportCitizenDto } from './dto/report-citizen.dto';
+import { UpdateStageDto } from './dto/update-stage.dto';
+import { CloseConsultationDto } from './dto/close-consultation.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -77,19 +79,50 @@ export class ConsultationController {
     return this.consultationService.getConsultation(id, user.sub);
   }
 
-  @Put(':id/close')
-  @UseGuards(RolesGuard)
-  @Roles('citizen')
-  @ApiOperation({ summary: 'Citizen ends an accepted consultation (citizen-only)' })
-  @ApiResponse({ status: 200, description: 'Consultation closed' })
-  @ApiResponse({ status: 400, description: 'Not in accepted state' })
-  @ApiResponse({ status: 403, description: 'Only the citizen may close' })
-  @ApiResponse({ status: 404, description: 'Not found' })
-  closeConsultation(
+  // Case timeline — readable by both participants (citizen views read-only on the FE).
+  @Get(':id/timeline')
+  @ApiOperation({ summary: 'Get the case timeline (stages + closure) for a consultation' })
+  @ApiResponse({ status: 200, description: 'Current stage, dated events, and closure detail' })
+  @ApiResponse({ status: 404, description: 'Not found or no access' })
+  getTimeline(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: JwtPayload,
   ) {
-    return this.consultationService.closeConsultation(id, user.sub);
+    return this.consultationService.getTimeline(id, user.sub);
+  }
+
+  // Advocate-only: advance (or correct) the case stage on an accepted consultation.
+  @Put(':id/stage')
+  @UseGuards(RolesGuard)
+  @Roles('advocate')
+  @ApiOperation({ summary: 'Advocate updates the case stage (advocate-only)' })
+  @ApiResponse({ status: 200, description: 'Stage updated; returns the new event' })
+  @ApiResponse({ status: 400, description: 'Invalid stage or not in accepted state' })
+  @ApiResponse({ status: 404, description: 'Not found or not the advocate on it' })
+  updateStage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateStageDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.consultationService.updateStage(id, user.sub, dto);
+  }
+
+  // Either party may end an accepted consultation. A CITIZEN close is their absolute
+  // right to withdraw (forced outcome 'withdrawn_by_client'). An ADVOCATE close issues
+  // the Consultation Closure Summary (requires an outcome + a written summary).
+  @Put(':id/close')
+  @UseGuards(RolesGuard)
+  @Roles('citizen', 'advocate')
+  @ApiOperation({ summary: 'End an accepted consultation (citizen withdrawal or advocate closure summary)' })
+  @ApiResponse({ status: 200, description: 'Consultation closed' })
+  @ApiResponse({ status: 400, description: 'Not in accepted state, or advocate close missing outcome/summary' })
+  @ApiResponse({ status: 404, description: 'Not found or not a participant' })
+  closeConsultation(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CloseConsultationDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.consultationService.closeConsultation(id, user.sub, user.role, dto);
   }
 
   // Advocate-only: report the citizen on a closed consultation (one per consultation).
