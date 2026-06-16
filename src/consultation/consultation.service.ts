@@ -187,7 +187,9 @@ export class ConsultationService {
 
     // Live nudge: light up the advocate's "Consultations" badge + refetch their list
     // in real time (their dashboard pending count too). Best-effort.
-    this.notifications.emitDataChanged(advocateResult.rows[0].user_id, 'consultations');
+    this.notifications.emitDataChanged(advocateResult.rows[0].user_id, 'consultations', {
+      kind: 'consultation_requested',
+    });
 
     // Let the advocate know a citizen wants to consult them — email with the matter
     // details + a deep link to this request. Fire-and-forget: a mail hiccup must
@@ -380,6 +382,39 @@ export class ConsultationService {
   // Both participants. The advocate edits the timeline (PUT :id/stage and the close
   // flow); the citizen sees it read-only on the frontend. Ownership is the same dual
   // check getConsultation uses: own citizen_id OR own one of this user's advocate ids.
+  /**
+   * List the uploaded documents of the matter behind a consultation. Readable by
+   * EITHER participant (the citizen who owns the matter, or the advocate on the
+   * consultation) — so the advocate can review the citizen's evidence during the chat
+   * without exposing the owner-gated /matter/:id/documents route to non-owners.
+   */
+  async getMatterDocuments(consultationId: string, userId: string) {
+    const access = await this.db.query(
+      `SELECT cr.matter_id
+         FROM consultation_request cr
+        WHERE cr.request_id = $1
+          AND (cr.citizen_id = $2 OR cr.advocate_id IN (
+                SELECT id FROM advocates WHERE user_id = $2
+              ))`,
+      [consultationId, userId],
+    );
+    if (!access.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
+
+    const docs = await this.db.query(
+      `SELECT id           AS "documentId",
+              matter_id     AS "matterId",
+              file_path     AS "fileUrl",
+              file_type     AS "fileType",
+              size,
+              uploaded_at   AS "uploadedAt"
+         FROM documents
+        WHERE matter_id = $1
+        ORDER BY uploaded_at ASC`,
+      [access.rows[0].matter_id],
+    );
+    return docs.rows;
+  }
+
   async getTimeline(consultationId: string, userId: string) {
     const result = await this.db.query(
       `SELECT cr.request_id AS "consultationId", cr.status,
@@ -659,7 +694,9 @@ export class ConsultationService {
     // client already refetches off the action response). The /ws close event above
     // only reaches whoever is sitting in the chat room — this covers their lists.
     const otherParty = by === 'citizen' ? row.advocate_user_id : row.citizen_id;
-    this.notifications.emitDataChanged(otherParty, 'consultations');
+    this.notifications.emitDataChanged(otherParty, 'consultations', {
+      kind: 'consultation_closed',
+    });
 
     return { consultationId, status: 'closed', by, outcomeKey: outcome };
   }
@@ -706,7 +743,9 @@ export class ConsultationService {
         [consultationId, row.advocate_id, row.citizen_id, dto.reason, dto.note ?? null],
       );
       // Light up the admin "Reports" queue live for every connected admin.
-      this.notifications.emitDataChangedToRole('admin', 'admin-reports');
+      this.notifications.emitDataChangedToRole('admin', 'admin-reports', {
+        kind: 'report_filed',
+      });
 
       return {
         reportId: ins.rows[0].id,
