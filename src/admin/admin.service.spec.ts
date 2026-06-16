@@ -89,6 +89,8 @@ describe('AdminService', () => {
 
     const mockNotifications = {
       emitUnreadBump: jest.fn(),
+      emitDataChanged: jest.fn(),
+      emitDataChangedToRole: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({

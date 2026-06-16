@@ -5,9 +5,10 @@ import { AdvocateService } from './advocate.service';
 import { DatabaseModule } from '../database/database.module';
 import { CloudinaryModule } from '../cloudinary/cloudinary.module';
 import { EmailModule } from '../email/email.module';
+import { ConversationModule } from '../conversation/conversation.module';
 
 @Module({
-  imports: [DatabaseModule, CloudinaryModule, EmailModule],
+  imports: [DatabaseModule, CloudinaryModule, EmailModule, ConversationModule],
   controllers: [AdvocateController, AdvocatePublicController],
   providers: [AdvocateService],
 })
