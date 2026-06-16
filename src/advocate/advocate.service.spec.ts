@@ -4,6 +4,7 @@ import { AdvocateService } from './advocate.service';
 import { DatabaseService } from '../database/database.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { EmailService } from '../email/email.service';
+import { NotificationsGateway } from '../conversation/notifications.gateway';
 
 describe('AdvocateService', () => {
   let service: AdvocateService;
@@ -66,12 +67,18 @@ describe('AdvocateService', () => {
       sendConsultationDeclined: jest.fn().mockResolvedValue(undefined),
     };
 
+    const mockNotifications = {
+      emitDataChanged: jest.fn(),
+      emitDataChangedToRole: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdvocateService,
         { provide: DatabaseService, useValue: mockDb },
         { provide: CloudinaryService, useValue: mockCloudinaryService },
         { provide: EmailService, useValue: mockEmailService },
+        { provide: NotificationsGateway, useValue: mockNotifications },
       ],
     }).compile();
 
