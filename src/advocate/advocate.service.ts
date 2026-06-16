@@ -358,7 +358,9 @@ export class AdvocateService {
 
     // Live nudge: the citizen's consultation list + dashboard reflect the new status
     // (accepted/declined) without a refresh, and their "Consultations" badge lights up.
-    this.notifications.emitDataChanged(citizen_id, 'consultations');
+    this.notifications.emitDataChanged(citizen_id, 'consultations', {
+      kind: action === 'accept' ? 'consultation_accepted' : 'consultation_declined',
+    });
 
     return { consultationId, status: newStatus, ...(declineReason && { declineReason }) };
   }
@@ -413,7 +415,9 @@ export class AdvocateService {
 
     // A new application just landed in the admin verification queue — light it up
     // live for every connected admin.
-    this.notifications.emitDataChangedToRole('admin', 'admin-advocates');
+    this.notifications.emitDataChangedToRole('admin', 'admin-advocates', {
+      kind: 'advocate_submitted',
+    });
 
     return {
       advocateId: advocate.id,

@@ -81,7 +81,9 @@ export class AdminService {
 
     // Live: flip the advocate's own verification banner/badge in their open session,
     // and drop this application off every admin's pending queue in real time.
-    this.notifications.emitDataChanged(advocate_user_id, 'verification');
+    this.notifications.emitDataChanged(advocate_user_id, 'verification', {
+      kind: action === 'approve' ? 'verification_approved' : 'verification_rejected',
+    });
     this.notifications.emitDataChangedToRole('admin', 'admin-advocates');
 
     return {
