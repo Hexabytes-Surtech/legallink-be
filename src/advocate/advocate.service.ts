@@ -6,6 +6,7 @@ import {
 import { DatabaseService } from '../database/database.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { EmailService } from '../email/email.service';
+import { NotificationsGateway } from '../conversation/notifications.gateway';
 import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { AdvocatesQueryDto } from './dto/advocates-query.dto';
@@ -40,6 +41,7 @@ export class AdvocateService {
     private db: DatabaseService,
     private cloudinaryService: CloudinaryService,
     private emailService: EmailService,
+    private notifications: NotificationsGateway,
   ) {}
 
   // ── GET /api/advocate/me ───────────────────────────────────────────────
@@ -341,7 +343,7 @@ export class AdvocateService {
     }
 
     // Category 5: Notify citizen by email (non-fatal).
-    const { citizen_email, matter_summary } = existing.rows[0];
+    const { citizen_email, citizen_id, matter_summary } = existing.rows[0];
     if (citizen_email) {
       if (action === 'accept') {
         this.emailService
@@ -353,6 +355,12 @@ export class AdvocateService {
           .catch(() => {});
       }
     }
+
+    // Live nudge: the citizen's consultation list + dashboard reflect the new status
+    // (accepted/declined) without a refresh, and their "Consultations" badge lights up.
+    this.notifications.emitDataChanged(citizen_id, 'consultations', {
+      kind: action === 'accept' ? 'consultation_accepted' : 'consultation_declined',
+    });
 
     return { consultationId, status: newStatus, ...(declineReason && { declineReason }) };
   }
@@ -404,6 +412,12 @@ export class AdvocateService {
        WHERE id = $1`,
       [advocate.id],
     );
+
+    // A new application just landed in the admin verification queue — light it up
+    // live for every connected admin.
+    this.notifications.emitDataChangedToRole('admin', 'admin-advocates', {
+      kind: 'advocate_submitted',
+    });
 
     return {
       advocateId: advocate.id,

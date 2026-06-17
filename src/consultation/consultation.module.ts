@@ -3,9 +3,10 @@ import { ConsultationController } from './consultation.controller';
 import { ConsultationService } from './consultation.service';
 import { DatabaseModule } from '../database/database.module';
 import { ConversationModule } from '../conversation/conversation.module';
+import { EmailModule } from '../email/email.module';
 
 @Module({
-  imports: [DatabaseModule, ConversationModule],
+  imports: [DatabaseModule, ConversationModule, EmailModule],
   controllers: [ConsultationController],
   providers: [ConsultationService],
   exports: [ConsultationService],
