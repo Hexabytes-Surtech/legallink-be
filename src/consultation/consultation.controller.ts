@@ -91,6 +91,19 @@ export class ConsultationController {
     return this.consultationService.getTimeline(id, user.sub);
   }
 
+  // Matter documents — readable by both participants (advocate reviews the citizen's
+  // uploaded evidence during the chat; citizen sees their own).
+  @Get(':id/documents')
+  @ApiOperation({ summary: "List the matter's uploaded documents for a consultation (either participant)" })
+  @ApiResponse({ status: 200, description: "Array of the matter's documents" })
+  @ApiResponse({ status: 404, description: 'Not found or no access' })
+  getDocuments(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.consultationService.getMatterDocuments(id, user.sub);
+  }
+
   // Advocate-only: advance (or correct) the case stage on an accepted consultation.
   @Put(':id/stage')
   @UseGuards(RolesGuard)

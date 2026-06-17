@@ -20,11 +20,17 @@ describe('ConsultationService (booking safety — Group B)', () => {
   let service: ConsultationService;
   let query: jest.Mock;
   let withTransaction: jest.Mock;
+  // EmailService + ConfigService + NotificationsGateway stubs — the advocate
+  // notification + realtime nudges are fire-and-forget, so the booking tests only
+  // need them not to blow up.
+  const email = { sendConsultationRequested: jest.fn().mockResolvedValue(undefined) } as any;
+  const config = { get: jest.fn().mockReturnValue('http://localhost:3000') } as any;
+  const notify = { emitDataChanged: jest.fn(), emitDataChangedToRole: jest.fn() } as any;
 
   beforeEach(() => {
     query = jest.fn();
     withTransaction = jest.fn();
-    service = new ConsultationService({ query, withTransaction } as any);
+    service = new ConsultationService({ query, withTransaction } as any, undefined as any, notify, email, config);
   });
 
   it('rejects a non-UUID advocateId with 400 before hitting the DB', async () => {
@@ -126,7 +132,7 @@ describe('ConsultationService (booking safety — Group B)', () => {
 
     beforeEach(() => {
       gateway = { emitConsultationClosed: jest.fn(), emitTimelineUpdated: jest.fn() };
-      service = new ConsultationService({ query, withTransaction } as any, gateway as any);
+      service = new ConsultationService({ query, withTransaction } as any, gateway as any, notify, email, config);
     });
 
     it('citizen close: completes the appointment in the same tx, forces withdrawn_by_client', async () => {
@@ -182,7 +188,7 @@ describe('ConsultationService (booking safety — Group B)', () => {
 
     beforeEach(() => {
       gateway = { emitTimelineUpdated: jest.fn() };
-      service = new ConsultationService({ query, withTransaction } as any, gateway as any);
+      service = new ConsultationService({ query, withTransaction } as any, gateway as any, notify, email, config);
     });
 
     it('advances the stage and broadcasts timeline_updated', async () => {
