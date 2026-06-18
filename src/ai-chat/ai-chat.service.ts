@@ -127,7 +127,8 @@ export class AiChatService {
     const cachedGrounding = this.groundingCache.get(conversationId) ?? null;
     let grounding = cachedGrounding;
     const substantive = text.trim().length >= 30;
-    if (!cachedGrounding || substantive) {
+    const worth = this.worthGrounding(narrative);
+    if (worth && (!cachedGrounding || substantive)) {
       const fresh = await this.ai.ground(narrative, conv.language);
       if (fresh?.citations?.length) {
         grounding = fresh;
@@ -143,9 +144,13 @@ export class AiChatService {
           `AI chat grounding empty this turn; reusing cached (${cachedGrounding.citations.length} citations)`,
         );
       }
-    } else {
+    } else if (cachedGrounding) {
       this.logger.log(
         `AI chat reused cached grounding: conversation=${conversationId} (${cachedGrounding.citations.length} citations)`,
+      );
+    } else {
+      this.logger.log(
+        `AI chat skipped grounding (greeting/small-talk): conversation=${conversationId}`,
       );
     }
 
@@ -228,6 +233,26 @@ export class AiChatService {
     };
   }
 
+  // Cheap intent gate (no LLM, no network): is this narrative worth a real legal
+  // search, or is it just greetings/small-talk? Strips common pleasantries (EN +
+  // Bengali) and grounds only when meaningful content remains — so "hello", "hi",
+  // "thanks", "ok", an emoji, etc. no longer fire the Indian Kanoon / Nyaaya /
+  // India Code pipeline. Errs toward grounding ANY non-greeting (incl. short ones
+  // like "police took my bike"), so a real legal query is never withheld.
+  private worthGrounding(narrative: string): boolean {
+    const stripped = (narrative || '')
+      .toLowerCase()
+      .replace(
+        /\b(hi+|hello+|hey+|yo|namaste|namaskar|good (morning|afternoon|evening|day|night)|thank you|thank u|thanks|ok|okay|kk|cool|nice|great|fine|hmm+|hm+|test+|please|pls|sir|madam|maam|how are you|what'?s up|whats up|are you there|you there|help)\b/g,
+        ' ',
+      )
+      .replace(/নমস্কার|হ্যালো|হেলো|হাই|ধন্যবাদ|কেমন আছেন/g, ' ')
+      .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+      .trim();
+    const words = stripped.split(/\s+/).filter((w) => w.length >= 2);
+    return words.length >= 2 || words.some((w) => w.length >= 6);
+  }
+
   // ── POST /api/ai/conversation/:id/message/stream  (Perplexity-style SSE) ──
   // Same turn as postMessage, but streamed: the citizen watches the agent analyse,
   // search Indian Kanoon, surface real sources, then the answer types out.
@@ -267,9 +292,10 @@ export class AiChatService {
       .slice(-2200);
     const cached = this.groundingCache.get(conversationId) ?? null;
     const substantive = text.trim().length >= 30;
+    const worth = this.worthGrounding(narrative);
     let grounding = cached;
 
-    if (!cached || substantive) {
+    if (worth && (!cached || substantive)) {
       let fresh: { matterType: string | null; applicableLaws: any[]; citations: any[] } | null = null;
       for await (const ev of this.ai.groundStream(narrative, conv.language)) {
         if (ev.event === 'step') yield sse('step', ev.data);
@@ -290,12 +316,15 @@ export class AiChatService {
       } else if (cached) {
         grounding = cached;
       }
-    } else {
+    } else if (cached) {
       // short follow-up: reuse cached sources instantly
       yield sse('step', { phase: 'thinking', label: 'Using what you told me' });
       for (const s of cached?.citations ?? []) yield sse('source', s);
       grounding = cached;
     }
+    // else: greeting/small-talk with no prior grounding → skip the legal search
+    // entirely (no "Searching Indian Kanoon" step, no sources emitted). The
+    // assistant still replies conversationally below via processTurn.
 
     // 2) GENERATE the grounded turn, then 3) stream the answer prose.
     yield sse('step', { phase: 'writing', label: 'Preparing your answer' });
