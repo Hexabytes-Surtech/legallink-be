@@ -159,7 +159,17 @@ export class IdentityService {
 
     // Hash-compare incoming OTP against stored hash
     if (!user.otp_code) throw new UnauthorizedException('No OTP requested');
-    const isMatch = await bcrypt.compare(otp, user.otp_code);
+
+    // Test-only bypass (gated by BYPASS_OTP_FOR_TESTING): accept BYPASS_OTP_CODE
+    // without the bcrypt compare. The user still had to request an OTP first, so
+    // otp_code/otp_expires_at must be set and unexpired (checked above). Inert in
+    // production where BYPASS_OTP_FOR_TESTING is unset.
+    const bypassOtp =
+      process.env.BYPASS_OTP_FOR_TESTING === 'true' &&
+      !!process.env.BYPASS_OTP_CODE &&
+      otp === process.env.BYPASS_OTP_CODE;
+
+    const isMatch = bypassOtp || (await bcrypt.compare(otp, user.otp_code));
     if (!isMatch) {
       this.registerFailedOtp(email); // E-4: count this failure, lock after the threshold
       throw new UnauthorizedException('INVALID_OTP');

@@ -1,0 +1,42 @@
+// 016 — Billing (incremental) — added in Sql/027_Billing.sql (2026-06-16)
+// Advocate SaaS subscription (Razorpay Orders / period-access model).
+// LegalLink sells SOFTWARE to advocates at a flat, fee-invariant price; it never
+// takes a cut of the legal fee. The entitlement gates TOOLING ONLY, never reachability.
+
+Table advocate_subscription {
+  id                   uuid [pk, default: `gen_random_uuid()`]
+  user_id              uuid [not null, unique, ref: > users.id]      // paying account
+  advocate_id          uuid [ref: > advocates.id]                    // resolved at purchase
+  plan_id              text [not null]                               // advocate_pro_monthly | advocate_pro_yearly
+  status               text [not null, default: 'inactive']          // inactive|active|expired|cancelled
+  current_period_start timestamptz
+  current_period_end   timestamptz                                   // entitlement expiry (guard checks this)
+  created_at           timestamptz [not null, default: `now()`]
+  updated_at           timestamptz [not null, default: `now()`]
+
+  indexes {
+    user_id
+    (user_id, current_period_end) // partial WHERE status='active' — guard hot path
+  }
+}
+
+Table billing_payment {
+  id                   uuid [pk, default: `gen_random_uuid()`]
+  user_id              uuid [not null, ref: > users.id]
+  advocate_id          uuid [ref: > advocates.id]
+  plan_id              text [not null]
+  amount               integer [not null]                            // flat software price, in paise
+  currency             text [not null, default: 'INR']
+  razorpay_order_id    text [not null, unique]
+  razorpay_payment_id  text [unique]
+  razorpay_signature   text
+  status               text [not null, default: 'created']           // created|paid|failed
+  notes                jsonb
+  created_at           timestamptz [not null, default: `now()`]
+  updated_at           timestamptz [not null, default: `now()`]
+
+  indexes {
+    user_id
+    razorpay_order_id
+  }
+}
