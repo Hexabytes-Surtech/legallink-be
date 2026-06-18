@@ -26,6 +26,7 @@ import { CleanupModule } from './cleanup/cleanup.module';
 import { AvailabilityModule } from './availability/availability.module';
 import { AppointmentModule } from './appointment/appointment.module';
 import { FeedbackModule } from './feedback/feedback.module';
+import { BillingModule } from './billing/billing.module';
 
 import { ResponseEnvelopeInterceptor } from './common/interceptors/response-envelope.interceptor';
 
@@ -55,6 +56,7 @@ import { ResponseEnvelopeInterceptor } from './common/interceptors/response-enve
     AvailabilityModule,
     AppointmentModule,
     FeedbackModule,
+    BillingModule,
   ],
   controllers: [AppController],
   providers: [
