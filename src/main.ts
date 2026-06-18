@@ -6,7 +6,9 @@ import cookieParser from 'cookie-parser';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody:true exposes req.rawBody (Buffer) so the Razorpay webhook can verify its
+  // HMAC signature over the exact bytes Razorpay signed.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   // Global error envelope (E-6) — mirrors the success envelope so the FE has one contract.
   app.useGlobalFilters(new AllExceptionsFilter());

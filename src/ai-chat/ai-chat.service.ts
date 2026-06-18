@@ -14,6 +14,7 @@ import {
   ChatClassification,
   ChatBrief,
 } from '../ai/gemini-chat.service';
+import { AiService } from '../ai/ai.service';
 
 const ANON_TTL_MS = 24 * 60 * 60 * 1000; // anonymous conversations expire after 24h
 const DISCLAIMER =
@@ -44,10 +45,17 @@ interface ConversationRow {
 @Injectable()
 export class AiChatService {
   private readonly logger = new Logger(AiChatService.name);
+  // Per-conversation grounding cache: short follow-up turns reuse the prior turn's
+  // retrieved citations instead of re-hitting the AI layer (~6s saved per turn).
+  private readonly groundingCache = new Map<
+    string,
+    { matterType: string | null; applicableLaws: any[]; citations: any[] }
+  >();
 
   constructor(
     private db: DatabaseService,
     private gemini: GeminiChatService,
+    private ai: AiService,
   ) {}
 
   // ── POST /api/ai/conversation ─────────────────────────────────────────────
@@ -106,12 +114,48 @@ export class AiChatService {
       [conversationId, text],
     );
 
+    // GROUND THIS TURN: retrieve real statute citations for the citizen's narrative so
+    // the chat cites real law verbatim. To keep turns fast, only RE-retrieve when the
+    // message adds real content; short follow-ups reuse the conversation's cached
+    // grounding. Non-fatal — runs ungrounded if the AI layer is unreachable.
+    const narrative = [
+      ...history.filter((m) => m.role === 'user').map((m) => m.content),
+      text,
+    ]
+      .join('\n')
+      .slice(-2200);
+    const cachedGrounding = this.groundingCache.get(conversationId) ?? null;
+    let grounding = cachedGrounding;
+    const substantive = text.trim().length >= 30;
+    if (!cachedGrounding || substantive) {
+      const fresh = await this.ai.ground(narrative, conv.language);
+      if (fresh?.citations?.length) {
+        grounding = fresh;
+        this.groundingCache.set(conversationId, fresh);
+        if (this.groundingCache.size > 2000) {
+          this.groundingCache.delete(this.groundingCache.keys().next().value as string);
+        }
+        this.logger.log(
+          `AI chat turn grounded: conversation=${conversationId} -> ${fresh.citations.length} citations (matter=${fresh.matterType ?? '?'})`,
+        );
+      } else if (cachedGrounding) {
+        this.logger.log(
+          `AI chat grounding empty this turn; reusing cached (${cachedGrounding.citations.length} citations)`,
+        );
+      }
+    } else {
+      this.logger.log(
+        `AI chat reused cached grounding: conversation=${conversationId} (${cachedGrounding.citations.length} citations)`,
+      );
+    }
+
     let turn: ChatTurnResult;
     try {
       turn = await this.gemini.processTurn({
         language: conv.language,
         history,
         userMessage: text,
+        grounding,
       });
     } catch (err) {
       this.logger.error(
@@ -131,9 +175,12 @@ export class AiChatService {
         JSON.stringify({
           phase: turn.phase,
           isLegalProblem: turn.isLegalProblem,
+          responseMode: turn.responseMode,
           followUpQuestion: turn.followUpQuestion,
           suggestedSteps: turn.suggestedSteps,
+          emergencyContacts: turn.emergencyContacts,
           readyToConnect: turn.readyToConnect,
+          citations: turn.citations,
         }),
       ],
     );
@@ -166,13 +213,158 @@ export class AiChatService {
       conversationId,
       phase: turn.phase,
       isLegalProblem: turn.isLegalProblem,
+      responseMode: turn.responseMode,
       assistantReply: turn.assistantReply,
       followUpQuestion: turn.followUpQuestion,
       suggestedSteps: turn.suggestedSteps,
+      emergencyContacts: turn.emergencyContacts,
+      safetyConcern: turn.classification.safetyConcern,
+      urgencyLevel: turn.classification.urgencyLevel,
       readyToConnect: turn.readyToConnect,
+      // real statute citations grounding this turn — shown to the citizen as evidence.
+      citations: turn.citations,
       // brief is internal (advocate-facing) — never surfaced to the citizen UI.
       matterId: conv.matter_id,
     };
+  }
+
+  // ── POST /api/ai/conversation/:id/message/stream  (Perplexity-style SSE) ──
+  // Same turn as postMessage, but streamed: the citizen watches the agent analyse,
+  // search Indian Kanoon, surface real sources, then the answer types out.
+  async *streamMessage(
+    conversationId: string,
+    message: string,
+    caller: Caller,
+  ): AsyncGenerator<string> {
+    const sse = (event: string, data: any) =>
+      `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+    const text = message?.trim();
+    if (!text) return void (yield sse('error', { message: 'MESSAGE_REQUIRED' }));
+    if (text.length > 4000) return void (yield sse('error', { message: 'MESSAGE_TOO_LONG' }));
+    if (!this.gemini.isAvailable()) return void (yield sse('error', { message: 'AI_UNAVAILABLE' }));
+
+    let conv: ConversationRow;
+    try {
+      conv = await this.loadOwned(conversationId, caller);
+    } catch {
+      return void (yield sse('error', { message: 'CONVERSATION_NOT_FOUND' }));
+    }
+    if (conv.phase === 'closed') return void (yield sse('error', { message: 'CONVERSATION_CLOSED' }));
+
+    const history = await this.loadHistory(conversationId);
+    await this.db.query(
+      `INSERT INTO ai_conversation_message (conversation_id, role, content) VALUES ($1, 'user', $2)`,
+      [conversationId, text],
+    );
+
+    // 1) GROUND — stream the real agent steps + sources to the citizen.
+    const narrative = [
+      ...history.filter((m) => m.role === 'user').map((m) => m.content),
+      text,
+    ]
+      .join('\n')
+      .slice(-2200);
+    const cached = this.groundingCache.get(conversationId) ?? null;
+    const substantive = text.trim().length >= 30;
+    let grounding = cached;
+
+    if (!cached || substantive) {
+      let fresh: { matterType: string | null; applicableLaws: any[]; citations: any[] } | null = null;
+      for await (const ev of this.ai.groundStream(narrative, conv.language)) {
+        if (ev.event === 'step') yield sse('step', ev.data);
+        else if (ev.event === 'source') yield sse('source', ev.data);
+        else if (ev.event === 'done')
+          fresh = {
+            matterType: ev.data.matter_type ?? null,
+            applicableLaws: ev.data.applicable_laws ?? [],
+            citations: ev.data.citations ?? [],
+          };
+      }
+      if (fresh?.citations?.length) {
+        grounding = fresh;
+        this.groundingCache.set(conversationId, fresh);
+        if (this.groundingCache.size > 2000)
+          this.groundingCache.delete(this.groundingCache.keys().next().value as string);
+        this.logger.log(`AI chat (stream) grounded: conversation=${conversationId} -> ${fresh.citations.length} citations`);
+      } else if (cached) {
+        grounding = cached;
+      }
+    } else {
+      // short follow-up: reuse cached sources instantly
+      yield sse('step', { phase: 'thinking', label: 'Using what you told me' });
+      for (const s of cached?.citations ?? []) yield sse('source', s);
+      grounding = cached;
+    }
+
+    // 2) GENERATE the grounded turn, then 3) stream the answer prose.
+    yield sse('step', { phase: 'writing', label: 'Preparing your answer' });
+    let turn: ChatTurnResult;
+    try {
+      turn = await this.gemini.processTurn({ language: conv.language, history, userMessage: text, grounding });
+    } catch (err) {
+      this.logger.error(`AI stream turn failed conversation=${conversationId}: ${(err as Error).message}`);
+      return void (yield sse('error', { message: 'AI_TURN_FAILED' }));
+    }
+
+    const words = (turn.assistantReply || '').split(' ');
+    for (let i = 0; i < words.length; i += 2) {
+      const chunk = words.slice(i, i + 2).join(' ') + (i + 2 < words.length ? ' ' : '');
+      yield sse('token', { text: chunk });
+      await new Promise((r) => setTimeout(r, 18));
+    }
+
+    // 4) Persist the assistant turn + advance state (same writes as postMessage).
+    await this.db.query(
+      `INSERT INTO ai_conversation_message (conversation_id, role, content, meta) VALUES ($1, 'assistant', $2, $3)`,
+      [
+        conversationId,
+        turn.assistantReply,
+        JSON.stringify({
+          phase: turn.phase,
+          isLegalProblem: turn.isLegalProblem,
+          responseMode: turn.responseMode,
+          followUpQuestion: turn.followUpQuestion,
+          suggestedSteps: turn.suggestedSteps,
+          emergencyContacts: turn.emergencyContacts,
+          readyToConnect: turn.readyToConnect,
+          citations: turn.citations,
+        }),
+      ],
+    );
+    const asked = turn.phase === 'gathering' && turn.followUpQuestion.trim().length > 0;
+    await this.db.query(
+      `UPDATE ai_conversation
+          SET phase = $1, is_legal = $2, ready_to_connect = $3, classification_json = $4,
+              brief_json = COALESCE($5, brief_json), question_count = question_count + $6, updated_at = now()
+        WHERE conversation_id = $7`,
+      [
+        turn.phase,
+        turn.isLegalProblem,
+        turn.readyToConnect,
+        JSON.stringify(turn.classification),
+        turn.brief ? JSON.stringify(turn.brief) : null,
+        asked ? 1 : 0,
+        conversationId,
+      ],
+    );
+
+    // 5) DONE — final structured state for the UI.
+    yield sse('done', {
+      conversationId,
+      phase: turn.phase,
+      isLegalProblem: turn.isLegalProblem,
+      responseMode: turn.responseMode,
+      assistantReply: turn.assistantReply,
+      followUpQuestion: turn.followUpQuestion,
+      suggestedSteps: turn.suggestedSteps,
+      emergencyContacts: turn.emergencyContacts,
+      safetyConcern: turn.classification.safetyConcern,
+      urgencyLevel: turn.classification.urgencyLevel,
+      readyToConnect: turn.readyToConnect,
+      citations: turn.citations,
+      matterId: conv.matter_id,
+    });
   }
 
   // ── GET /api/ai/conversation/:id ──────────────────────────────────────────
@@ -268,6 +460,20 @@ export class AiChatService {
     const classification = conv.classification_json ?? null;
     const brief = conv.brief_json;
     const matterId = await this.materialiseMatter(conv, classification, brief, caller.citizenId);
+
+    // Generate the GROUNDED brief via the AI layer (legallink-rag). materialiseMatter
+    // already wrote the conversational (gemini-chat) brief as an immediate fallback;
+    // processMatter writes the RAG brief — real statute citations, currency-checked —
+    // as the newer matter_brief_version the matter detail surfaces. Non-fatal.
+    const ragQuery =
+      brief.sceneSummary?.trim() || brief.citizenGoal?.trim() || 'AI-assisted intake';
+    try {
+      await this.ai.processMatter(matterId, ragQuery, conv.language);
+    } catch (err) {
+      this.logger.warn(
+        `AI layer brief failed for assistant matter=${matterId} (${(err as Error).message}); kept conversational brief`,
+      );
+    }
 
     this.logger.log(
       `AI chat conversation=${conversationId} connected → matter=${matterId} (citizen=${caller.citizenId})`,
