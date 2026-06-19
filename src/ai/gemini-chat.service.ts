@@ -219,7 +219,17 @@ Return STRICTLY one JSON object matching the schema. No prose outside JSON, and 
 
 // Models tried in order if the primary configured model returns retryable errors
 // across all retries. Mirrors GeminiAiService so both brains degrade the same way.
-const FALLBACK_MODELS = ['gemini-flash-latest', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+// Gemini 3 models are escape hatches when the 2.5 family is overloaded (503); they're
+// verified against generateContent with our exact config (responseSchema +
+// thinkingBudget:0). gemini-2.0-flash removed — it's being shut down (404).
+const FALLBACK_MODELS = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
+
+// Hard caps so a slow/overloaded Gemini never hangs a turn past the citizen's
+// connection lifetime: each call is aborted after GEN_CALL_TIMEOUT_MS, and the whole
+// turn stops trying after GEN_TOTAL_DEADLINE_MS (fail fast → the user retries, instead
+// of a ~2-minute grind the browser already abandoned).
+const GEN_CALL_TIMEOUT_MS = 15_000;
+const GEN_TOTAL_DEADLINE_MS = 40_000;
 
 @Injectable()
 export class GeminiChatService {
@@ -285,33 +295,43 @@ export class GeminiChatService {
   ): Promise<Partial<ChatTurnResult>> {
     const groundingBlock = this.buildGroundingBlock(grounding);
     let lastError: Error | undefined;
+    const deadline = Date.now() + GEN_TOTAL_DEADLINE_MS;
 
     for (let m = 0; m < this.modelChain.length; m++) {
+      if (Date.now() > deadline) {
+        this.logger.warn(`Gemini chat total deadline (${GEN_TOTAL_DEADLINE_MS}ms) reached; not trying more models`);
+        break;
+      }
       const model = this.modelChain[m];
       const isPrimary = m === 0;
-      const maxAttempts = isPrimary ? 3 : 2;
-      const backoffMs = [0, 1500, 4000];
+      const maxAttempts = isPrimary ? 2 : 1;
+      const backoffMs = [0, 800];
 
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         if (attempt > 0) {
           this.logger.warn(`Gemini chat retry ${attempt}/${maxAttempts - 1} on model=${model} after ${backoffMs[attempt]}ms (last: ${lastError?.message?.slice(0, 120)})`);
           await new Promise(r => setTimeout(r, backoffMs[attempt]));
         }
+        if (Date.now() > deadline) break;
         try {
-          const response = await this.client!.models.generateContent({
-            model,
-            contents,
-            config: {
-              systemInstruction: `${SYSTEM_INSTRUCTION}\n\n${groundingBlock}\n\n(The citizen is writing in ${langName}. Reply to them in ${langName}; write the brief in English.)`,
-              responseMimeType: 'application/json',
-              responseSchema: CHAT_TURN_SCHEMA,
-              temperature: 0.5,
-              maxOutputTokens: 3072,
-              // Thinking OFF: a grounded triage turn doesn't need a reasoning budget,
-              // and it was adding ~5s/turn. Cuts chat latency from ~8s to ~2-3s.
-              thinkingConfig: { thinkingBudget: 0 },
-            },
-          });
+          // Per-call timeout: a single overloaded call must never hang the turn.
+          const response = await this.withTimeout(
+            this.client!.models.generateContent({
+              model,
+              contents,
+              config: {
+                systemInstruction: `${SYSTEM_INSTRUCTION}\n\n${groundingBlock}\n\n(The citizen is writing in ${langName}. Reply to them in ${langName}; write the brief in English.)`,
+                responseMimeType: 'application/json',
+                responseSchema: CHAT_TURN_SCHEMA,
+                temperature: 0.5,
+                maxOutputTokens: 3072,
+                // Thinking OFF: a grounded triage turn doesn't need a reasoning budget,
+                // and it was adding ~5s/turn. Cuts chat latency from ~8s to ~2-3s.
+                thinkingConfig: { thinkingBudget: 0 },
+              },
+            }),
+            GEN_CALL_TIMEOUT_MS,
+          );
 
           const text = response.text;
           if (!text) throw new Error('Gemini returned an empty response');
@@ -366,6 +386,19 @@ export class GeminiChatService {
     return `GROUNDING CONTEXT — real provisions retrieved for THIS citizen's situation. Reference the law ONLY using these; quote the key words verbatim. If none fit, ask a clarifying question instead of guessing.\n\n${lines.join('\n')}`;
   }
 
+  // Race a promise against a timeout so one slow/overloaded call can't hang the turn.
+  private async withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`gemini call exceeded ${ms}ms timeout`)), ms);
+    });
+    try {
+      return await Promise.race([work, timeout]);
+    } finally {
+      clearTimeout(timer!);
+    }
+  }
+
   private isRetryable(err: Error): boolean {
     const msg = (err.message || '').toLowerCase();
     return (
@@ -376,7 +409,10 @@ export class GeminiChatService {
       msg.includes('overload') ||
       msg.includes('rate limit') ||
       msg.includes('high demand') ||
-      msg.includes('temporary')
+      msg.includes('temporary') ||
+      msg.includes('timeout') ||
+      msg.includes('exceeded') ||
+      msg.includes('aborted')
     );
   }
 
