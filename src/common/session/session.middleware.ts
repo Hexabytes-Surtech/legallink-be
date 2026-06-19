@@ -17,13 +17,19 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 @Injectable()
 export class SessionMiddleware implements NestMiddleware {
   use(req: Request & { anonymousSessionId?: string }, res: Response, next: NextFunction) {
-    const incoming = req.cookies?.[LEGALLINK_SESSION_COOKIE];
-    let sessionId: string;
+    // Prefer the X-Anon-Session header (FE localStorage) — it survives incognito, where
+    // the cross-site `legallink_session` cookie is dropped as a third-party cookie. Fall
+    // back to the cookie, then mint a fresh id.
+    const header = req.headers['x-anon-session'];
+    const cookie = req.cookies?.[LEGALLINK_SESSION_COOKIE];
+    let sessionId: string | undefined;
 
-    if (typeof incoming === 'string' && UUID_RE.test(incoming)) {
-      sessionId = incoming;
-    } else {
-      sessionId = randomUUID();
+    if (typeof header === 'string' && UUID_RE.test(header)) sessionId = header;
+    else if (typeof cookie === 'string' && UUID_RE.test(cookie)) sessionId = cookie;
+    if (!sessionId) sessionId = randomUUID();
+
+    // Keep the cookie aligned (best-effort; harmlessly blocked in incognito).
+    if (cookie !== sessionId) {
       res.cookie(LEGALLINK_SESSION_COOKIE, sessionId, {
         ...sessionCookieOptions(),
         maxAge: THIRTY_DAYS_MS,
