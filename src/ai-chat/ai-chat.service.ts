@@ -162,6 +162,7 @@ export class AiChatService {
         userMessage: text,
         grounding,
       });
+      this.forceEmergencyContactsIfDanger(turn, text, conversationId);
     } catch (err) {
       this.logger.error(
         `AI turn failed for conversation=${conversationId}: ${(err as Error).message}`,
@@ -231,6 +232,28 @@ export class AiChatService {
       // brief is internal (advocate-facing) — never surfaced to the citizen UI.
       matterId: conv.matter_id,
     };
+  }
+
+  // Safety net (LLM-independent): active physical danger / self-harm MUST surface the
+  // emergency helplines + flags, even if the model's structured output omits them. The
+  // SAFETY OVERRIDE system prompt is the first layer; this GUARANTEES it. Mutates `turn`.
+  private forceEmergencyContactsIfDanger(turn: ChatTurnResult, text: string, conversationId: string): void {
+    const danger =
+      /\b(hitting me|beating me|beat me up|attacking me|attacked me|(he|she|they|husband|wife|father|mother|brother|in.?laws?) (is |are |')?(hitting|beating|attacking|abusing) me|going to kill|threaten(ing|ed)? to kill|kill me|kill myself|killing myself|end my life|commit suicide|want to die|harm myself|hurt myself|self.?harm|being raped|raping me|molest(ing|ed) me|strangl(e|ing) me|choking me)\b/i;
+    if (!danger.test(text || '')) return;
+    turn.responseMode = 'immediate_help';
+    turn.classification.safetyConcern = true;
+    turn.classification.urgencyLevel = 'high';
+    turn.classification.situation = 'in_progress';
+    if (!turn.emergencyContacts?.some((c) => c && c.number)) {
+      turn.emergencyContacts = [
+        { label: 'Police (emergency)', number: '112' },
+        { label: "Women's helpline", number: '1091' },
+        { label: 'Domestic violence support', number: '181' },
+        { label: 'Child helpline', number: '1098' },
+      ];
+    }
+    this.logger.warn(`AI chat: danger signal → forced emergency contacts (conversation=${conversationId})`);
   }
 
   // Cheap intent gate (no LLM, no network): is this narrative worth a real legal
@@ -347,6 +370,7 @@ export class AiChatService {
         `AI stream turn ok: conversation=${conversationId} gen=${Date.now() - genStart}ms ` +
           `grounded=${grounding?.citations?.length ?? 0} phase=${turn.phase}`,
       );
+      this.forceEmergencyContactsIfDanger(turn, text, conversationId);
     } catch (err) {
       const e = err as Error & { status?: number; code?: string };
       this.logger.error(
