@@ -241,14 +241,15 @@ export class AiChatService {
   // like "police took my bike"), so a real legal query is never withheld.
   private worthGrounding(narrative: string): boolean {
     const t = (narrative || '').toLowerCase();
-    // Identity / meta / capability questions are NOT legal queries — never ground them.
-    // (The LLM planner can transiently fall back to a "legal" default, so catch the
-    // obvious ones cheaply here too — e.g. "who made you", "what can you do".)
-    if (
-      /\b(who (are|made|built|created|owns?|develop(s|ed)?) you|who'?s your (maker|creator|developer|owner)|what (are|r) you|are you (a |an )?(bot|ai|robot|human|chat ?gpt|gemini|gpt|llm|machine|real|person)|what can you do|what do you do|how (do|does|can) (you|this|it) work|your name)\b/i.test(
-        t,
-      )
-    ) {
+    // Non-legal buckets — identity/meta, off-domain requests, and prompt-injection — are
+    // NOT legal queries, so never ground them. This is the cheap, LLM-INDEPENDENT layer:
+    // the rag planner's is_legal is a backstop, but flash-lite 503s/truncates, so this
+    // must stand on its own. (Defense-in-depth per OWASP/guardrail best practice.)
+    const NON_LEGAL =
+      /\b(who (are|made|built|created|owns?|develop(s|ed)?|powers?|runs?) you|who(?:'?s| is) (your (maker|creator|developer|owner)|behind (you|this|it))|which (company|model|ai) (made|built|owns|runs|is behind|are you)|what (ai |language )?(model|llm) (are|do|did) you|are you (powered by|built on|running on|based on)|what (are|r) you|are you (a |an )?(bot|ai|robot|human|chat ?gpt|gemini|gpt|llm|machine|real|person|sentient)|what can you do|what do you do|how (do|does|can) (you|this|it) work|your name|(write|compose|create|generate|make|draft|give me|tell me) (me )?(a |an )?(poem|song|story|essay|joke|code|script|function|program|email|letter|recipe|haiku)|in (python|javascript|java|sql)|python (function|code|script)|what is \d+ ?(times|plus|minus|multiplied by|divided by|x|\*|\+|\/|×|÷) ?\d+|(weather|temperature) (in|today|now|outside)|who won|cricket|football|match score|capital of|the news|tell me a joke|translate (this|the|to))\b/i;
+    const INJECTION =
+      /\b(ignore (all |the |your |any )*(previous |prior |above )*(instructions|prompts?|rules)|disregard (the |your |all )*(previous |above )*(instructions|rules|prompt)|forget (your|the|all|everything|previous) (instructions|rules)|(print|reveal|show|repeat|tell me) (your|the) (system )?(prompt|instructions|rules)|system prompt|you are now|act as (if|though|a|an)|pretend (you|to be|that|i)|developer mode|jailbreak|dan mode|do anything now)\b/i;
+    if (NON_LEGAL.test(t) || INJECTION.test(t)) {
       return false;
     }
     const stripped = t
