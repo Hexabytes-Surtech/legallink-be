@@ -329,10 +329,21 @@ export class AiChatService {
     // 2) GENERATE the grounded turn, then 3) stream the answer prose.
     yield sse('step', { phase: 'writing', label: 'Preparing your answer' });
     let turn: ChatTurnResult;
+    const genStart = Date.now();
     try {
       turn = await this.gemini.processTurn({ language: conv.language, history, userMessage: text, grounding });
+      this.logger.log(
+        `AI stream turn ok: conversation=${conversationId} gen=${Date.now() - genStart}ms ` +
+          `grounded=${grounding?.citations?.length ?? 0} phase=${turn.phase}`,
+      );
     } catch (err) {
-      this.logger.error(`AI stream turn failed conversation=${conversationId}: ${(err as Error).message}`);
+      const e = err as Error & { status?: number; code?: string };
+      this.logger.error(
+        `AI stream turn FAILED conversation=${conversationId} gen=${Date.now() - genStart}ms ` +
+          `grounded=${grounding?.citations?.length ?? 0} msgLen=${text.length} ` +
+          `status=${e.status ?? '?'} code=${e.code ?? '?'} reason="${e.message}"`,
+        e.stack,
+      );
       return void (yield sse('error', { message: 'AI_TURN_FAILED' }));
     }
 

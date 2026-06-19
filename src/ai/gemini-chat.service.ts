@@ -344,6 +344,11 @@ export class GeminiChatService {
         this.logger.warn(`Gemini chat model=${model} exhausted retries; falling back to model=${this.modelChain[m + 1]}`);
       }
     }
+    const ex = lastError as (Error & { status?: number }) | undefined;
+    this.logger.error(
+      `Gemini chat EXHAUSTED all models [${this.modelChain.join(', ')}] — ` +
+        `status=${ex?.status ?? '?'} reason="${ex?.message ?? 'unknown'}"`,
+    );
     throw lastError ?? new Error('Gemini chat call failed across all models');
   }
 

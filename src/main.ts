@@ -1,5 +1,6 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, Logger } from '@nestjs/common';
+import type { Request, Response, NextFunction } from 'express';
 import { AppModule } from './app.module';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
@@ -41,6 +42,23 @@ async function bootstrap() {
 
   // Parse cookies — refresh token is read from req.cookies.refreshToken
   app.use(cookieParser());
+
+  // Request logger — method, path, status, duration. Gives the BE the same REQ-level
+  // visibility the AI layer already has, so failures stop being invisible.
+  // NOTE: SSE turns always FINISH 200 even when an in-band error event is sent — those
+  // (AI_TURN_FAILED etc.) are logged inside AiChatService/AiChatController instead.
+  const httpLogger = new Logger('HTTP');
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      const ms = Date.now() - start;
+      const line = `${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)`;
+      if (res.statusCode >= 500) httpLogger.error(line);
+      else if (res.statusCode >= 400) httpLogger.warn(line);
+      else httpLogger.log(line);
+    });
+    next();
+  });
 
   // All routes are prefixed with /api  (e.g. /api/auth/register)
   app.setGlobalPrefix('api');
