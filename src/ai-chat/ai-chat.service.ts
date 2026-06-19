@@ -240,8 +240,18 @@ export class AiChatService {
   // India Code pipeline. Errs toward grounding ANY non-greeting (incl. short ones
   // like "police took my bike"), so a real legal query is never withheld.
   private worthGrounding(narrative: string): boolean {
-    const stripped = (narrative || '')
-      .toLowerCase()
+    const t = (narrative || '').toLowerCase();
+    // Identity / meta / capability questions are NOT legal queries — never ground them.
+    // (The LLM planner can transiently fall back to a "legal" default, so catch the
+    // obvious ones cheaply here too — e.g. "who made you", "what can you do".)
+    if (
+      /\b(who (are|made|built|created|owns?|develop(s|ed)?) you|who'?s your (maker|creator|developer|owner)|what (are|r) you|are you (a |an )?(bot|ai|robot|human|chat ?gpt|gemini|gpt|llm|machine|real|person)|what can you do|what do you do|how (do|does|can) (you|this|it) work|your name)\b/i.test(
+        t,
+      )
+    ) {
+      return false;
+    }
+    const stripped = t
       .replace(
         /\b(hi+|hello+|hey+|yo|namaste|namaskar|good (morning|afternoon|evening|day|night)|thank you|thank u|thanks|ok|okay|kk|cool|nice|great|fine|hmm+|hm+|test+|please|pls|sir|madam|maam|how are you|what'?s up|whats up|are you there|you there|help)\b/g,
         ' ',
