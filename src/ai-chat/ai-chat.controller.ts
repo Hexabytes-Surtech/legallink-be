@@ -8,6 +8,7 @@ import {
   ParseUUIDPipe,
   UseGuards,
   Res,
+  Logger,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
@@ -22,6 +23,7 @@ import { AnonymousSessionId } from '../common/session/anonymous-session.decorato
 @ApiTags('AI Chat')
 @Controller('ai/conversation')
 export class AiChatController {
+  private readonly logger = new Logger(AiChatController.name);
   constructor(private readonly aiChat: AiChatService) {}
 
   // ── GET /api/ai/conversation  (history list for the signed-in citizen) ────
@@ -113,7 +115,9 @@ export class AiChatController {
         res.write(chunk);
       }
     } catch (err) {
-      res.write(`event: error\ndata: ${JSON.stringify({ message: (err as Error).message })}\n\n`);
+      const e = err as Error;
+      this.logger.error(`SSE stream crashed: conversation=${id} reason="${e.message}"`, e.stack);
+      res.write(`event: error\ndata: ${JSON.stringify({ message: e.message })}\n\n`);
     } finally {
       res.end();
     }
