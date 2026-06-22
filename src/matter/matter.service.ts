@@ -352,6 +352,7 @@ export class MatterService {
       candidateTerms,
       district,
       language,
+      canonicalLabel,  // used to look up advocate win records in case history
       limit,
       offset,
     );

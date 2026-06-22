@@ -156,19 +156,23 @@ export class AiChatService {
 
     let turn: ChatTurnResult;
     try {
-      turn = await this.gemini.processTurn({
-        language: conv.language,
-        history,
-        userMessage: text,
-        grounding,
-      });
+      turn = await this.gemini.processTurn({ language: conv.language, history, userMessage: text, grounding });
       this.forceEmergencyContactsIfDanger(turn, text, conversationId);
-    } catch (err) {
-      this.logger.error(
-        `AI turn failed for conversation=${conversationId}: ${(err as Error).message}`,
-        (err as Error).stack,
+    } catch (firstErr) {
+      this.logger.warn(
+        `AI turn attempt 1 failed, retrying: conversation=${conversationId}: ${(firstErr as Error).message}`,
       );
-      throw new ServiceUnavailableException('AI_TURN_FAILED');
+      await new Promise((r) => setTimeout(r, 1200));
+      try {
+        turn = await this.gemini.processTurn({ language: conv.language, history, userMessage: text, grounding });
+        this.forceEmergencyContactsIfDanger(turn, text, conversationId);
+      } catch (err) {
+        this.logger.error(
+          `AI turn failed (both attempts) for conversation=${conversationId}: ${(err as Error).message}`,
+          (err as Error).stack,
+        );
+        throw new ServiceUnavailableException('AI_TURN_FAILED');
+      }
     }
 
     // Persist the assistant turn (with its structured extras in meta for the record).
@@ -361,6 +365,8 @@ export class AiChatService {
     // assistant still replies conversationally below via processTurn.
 
     // 2) GENERATE the grounded turn, then 3) stream the answer prose.
+    // One outer retry with a visible "retrying" step so the citizen never sees a
+    // cold "AI turn Failed" for a transient overload — they see progress instead.
     yield sse('step', { phase: 'writing', label: 'Preparing your answer' });
     let turn: ChatTurnResult;
     const genStart = Date.now();
@@ -371,15 +377,31 @@ export class AiChatService {
           `grounded=${grounding?.citations?.length ?? 0} phase=${turn.phase}`,
       );
       this.forceEmergencyContactsIfDanger(turn, text, conversationId);
-    } catch (err) {
-      const e = err as Error & { status?: number; code?: string };
-      this.logger.error(
-        `AI stream turn FAILED conversation=${conversationId} gen=${Date.now() - genStart}ms ` +
-          `grounded=${grounding?.citations?.length ?? 0} msgLen=${text.length} ` +
-          `status=${e.status ?? '?'} code=${e.code ?? '?'} reason="${e.message}"`,
-        e.stack,
+    } catch (firstErr) {
+      const e1 = firstErr as Error & { status?: number; code?: string };
+      this.logger.warn(
+        `AI stream turn attempt 1 failed, retrying: conversation=${conversationId} ` +
+          `status=${e1.status ?? '?'} reason="${e1.message}"`,
       );
-      return void (yield sse('error', { message: 'AI_TURN_FAILED' }));
+      yield sse('step', { phase: 'retrying', label: 'One moment, retrying…' });
+      await new Promise((r) => setTimeout(r, 1200));
+      try {
+        turn = await this.gemini.processTurn({ language: conv.language, history, userMessage: text, grounding });
+        this.logger.log(
+          `AI stream turn ok (retry): conversation=${conversationId} gen=${Date.now() - genStart}ms ` +
+            `grounded=${grounding?.citations?.length ?? 0} phase=${turn.phase}`,
+        );
+        this.forceEmergencyContactsIfDanger(turn, text, conversationId);
+      } catch (err) {
+        const e = err as Error & { status?: number; code?: string };
+        this.logger.error(
+          `AI stream turn FAILED (both attempts) conversation=${conversationId} gen=${Date.now() - genStart}ms ` +
+            `grounded=${grounding?.citations?.length ?? 0} msgLen=${text.length} ` +
+            `status=${e.status ?? '?'} code=${e.code ?? '?'} reason="${e.message}"`,
+          e.stack,
+        );
+        return void (yield sse('error', { message: 'AI_TURN_FAILED' }));
+      }
     }
 
     const words = (turn.assistantReply || '').split(' ');

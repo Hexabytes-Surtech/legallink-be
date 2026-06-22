@@ -3,6 +3,7 @@ import {
   Get,
   Put,
   Post,
+  Delete,
   Body,
   Param,
   ParseUUIDPipe,
@@ -28,6 +29,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { JwtPayload } from '../common/decorators/current-user.decorator';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { ConsultationActionDto } from './dto/consultation-action.dto';
+import { AddCaseHistoryDto } from './dto/case-history.dto';
 
 @ApiTags('Advocate')
 @ApiBearerAuth()
@@ -136,6 +138,33 @@ export class AdvocateController {
     @Body() dto: ConsultationActionDto,
   ) {
     return this.advocateService.updateConsultation(user.sub, id, dto.action, dto.declineReason);
+  }
+
+  // ── Case History ─────────────────────────────────────────────────────
+  @Get('case-history')
+  @ApiOperation({ summary: 'List own case history entries' })
+  listCaseHistory(@CurrentUser() user: JwtPayload) {
+    return this.advocateService.listCaseHistory(user.sub);
+  }
+
+  @Post('case-history')
+  @ApiOperation({ summary: 'Add a self-reported case history entry' })
+  @ApiBody({ type: AddCaseHistoryDto })
+  @ApiResponse({ status: 201, description: 'Entry created' })
+  addCaseHistory(@CurrentUser() user: JwtPayload, @Body() dto: AddCaseHistoryDto) {
+    return this.advocateService.addCaseHistory(user.sub, dto);
+  }
+
+  @Delete('case-history/:id')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Delete a case history entry' })
+  @ApiResponse({ status: 200, description: 'Entry deleted' })
+  @ApiResponse({ status: 404, description: 'Entry not found' })
+  deleteCaseHistory(
+    @CurrentUser() user: JwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.advocateService.deleteCaseHistory(user.sub, id);
   }
 
   @Post('submit-verification')

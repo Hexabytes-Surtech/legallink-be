@@ -10,6 +10,7 @@ import { NotificationsGateway } from '../conversation/notifications.gateway';
 import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { AdvocatesQueryDto } from './dto/advocates-query.dto';
+import { AddCaseHistoryDto } from './dto/case-history.dto';
 
 // Canonical practice-area vocabulary (matches FE constants + public directory filter).
 const CANONICAL_PRACTICE_AREAS = new Set(['Criminal','Civil','Family','Labour','Tenancy','Traffic','Consumer']);
@@ -541,6 +542,57 @@ export class AdvocateService {
     // they're the proven credentials behind the verification. Hidden otherwise.
     if (row.verification_status !== 'verified') row.documents = [];
     return row;
+  }
+
+  // ── Case History (self-reported) ─────────────────────────────────────
+  // Advocates report their own past cases. No client PII — just matter type,
+  // court, district, and outcome. Used by the matching algorithm.
+
+  async listCaseHistory(userId: string) {
+    const advocate = await this.getAdvocateByUserId(userId);
+    const result = await this.db.query(
+      `SELECT id, matter_type, court, district, outcome, year, notes, created_at
+       FROM advocate_case_history
+       WHERE advocate_id = $1
+       ORDER BY year DESC NULLS LAST, created_at DESC`,
+      [advocate.id],
+    );
+    return result.rows;
+  }
+
+  async addCaseHistory(userId: string, dto: AddCaseHistoryDto) {
+    const advocate = await this.getAdvocateByUserId(userId);
+    // Cap at 50 entries so the table stays lean and the matching query stays fast.
+    const countRes = await this.db.query(
+      `SELECT COUNT(*)::int AS total FROM advocate_case_history WHERE advocate_id = $1`,
+      [advocate.id],
+    );
+    if (countRes.rows[0].total >= 50) {
+      throw new BadRequestException('Case history limit reached (50). Remove old entries first.');
+    }
+    const result = await this.db.query(
+      `INSERT INTO advocate_case_history
+         (advocate_id, matter_type, court, district, outcome, year, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, matter_type, court, district, outcome, year, notes, created_at`,
+      [advocate.id, dto.matter_type, dto.court.trim(), dto.district.trim(),
+       dto.outcome, dto.year ?? null, dto.notes?.trim() ?? null],
+    );
+    return result.rows[0];
+  }
+
+  async deleteCaseHistory(userId: string, entryId: string) {
+    const advocate = await this.getAdvocateByUserId(userId);
+    const result = await this.db.query(
+      `DELETE FROM advocate_case_history
+       WHERE id = $1 AND advocate_id = $2
+       RETURNING id`,
+      [entryId, advocate.id],
+    );
+    if (!result.rows.length) {
+      throw new NotFoundException('Case history entry not found');
+    }
+    return { deleted: true };
   }
 
   // ── Private Helpers ───────────────────────────────────────────────────
