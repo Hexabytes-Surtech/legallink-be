@@ -267,6 +267,55 @@ export class GeminiChatService {
     return this.client !== null;
   }
 
+  // STT model chain: primary 2.5-flash-lite → gemini-3-flash-preview on overload.
+  // These are NOT the same as the chat model chain (which uses the GEMINI_MODEL env var)
+  // because we want STT to always use the lightest capable model and fall back to
+  // gemini-3 only on 429/503 — never going back to 2.5 on the retry.
+  private readonly sttModelChain = ['gemini-2.5-flash-lite', 'gemini-3-flash-preview'];
+
+  async transcribeAudio(base64Wav: string, lang: 'en' | 'bn'): Promise<string> {
+    if (!this.client) throw new Error('Gemini client not initialised (GEMINI_API_KEY missing)');
+
+    const langName = lang === 'bn' ? 'Bengali (output in Bengali/Bangla script)' : 'English';
+    const prompt =
+      `You are a precise speech-to-text engine. Transcribe the spoken audio verbatim in ${langName}. ` +
+      `Output ONLY the exact transcription text — no quotes, no preamble, no notes, no translation, no markdown. ` +
+      `If the audio is silent or unintelligible, output nothing at all.`;
+
+    let lastError: Error | undefined;
+    for (const model of this.sttModelChain) {
+      try {
+        const response = await this.withTimeout(
+          this.client.models.generateContent({
+            model,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: prompt },
+                  { inlineData: { mimeType: 'audio/wav', data: base64Wav } },
+                ],
+              },
+            ],
+            config: { temperature: 0, maxOutputTokens: 2048 },
+          }),
+          20_000,
+        );
+        const raw = (response.text ?? '').trim();
+        // Strip a stray wrapping quote or "Transcription:" label the model sometimes adds.
+        return raw
+          .replace(/^(?:transcription|transcript)\s*:\s*/i, '')
+          .replace(/^["“]|["”]$/g, '')
+          .trim();
+      } catch (err) {
+        lastError = err as Error;
+        if (!this.isRetryable(lastError)) throw lastError;
+        this.logger.warn(`STT model=${model} failed (${lastError.message.slice(0, 80)}); trying next`);
+      }
+    }
+    throw lastError ?? new Error('STT failed across all models');
+  }
+
   // Run one conversational turn. Returns the structured turn (reply + state).
   async processTurn(input: ChatTurnInput): Promise<ChatTurnResult> {
     if (!this.client) {
