@@ -1,6 +1,8 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import type { Request, Response, NextFunction } from 'express';
+import type { IncomingMessage } from 'http';
 import { AppModule } from './app.module';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
@@ -9,7 +11,15 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 async function bootstrap() {
   // rawBody:true exposes req.rawBody (Buffer) so the Razorpay webhook can verify its
   // HMAC signature over the exact bytes Razorpay signed.
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
+  // Override the default 100 KB JSON body limit — voice audio base64 payloads can be ~2 MB.
+  // We re-apply the same rawBody verify so the Razorpay webhook HMAC check keeps working.
+  app.useBodyParser('json', {
+    limit: '5mb',
+    verify: (req: IncomingMessage & { rawBody?: Buffer }, _res, buf: Buffer) => {
+      req.rawBody = buf;
+    },
+  });
 
   // Global error envelope (E-6) — mirrors the success envelope so the FE has one contract.
   app.useGlobalFilters(new AllExceptionsFilter());
