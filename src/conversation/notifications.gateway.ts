@@ -23,14 +23,7 @@ import { Server, Socket } from 'socket.io';
  */
 @WebSocketGateway({
   namespace: '/notify',
-  cors: {
-    origin: (origin: string, cb: (err: null, allow: boolean) => void) => {
-      const allowed = process.env.CORS_ORIGIN?.split(',') ?? ['*'];
-      if (allowed.includes('*') || !origin || allowed.includes(origin)) cb(null, true);
-      else cb(null, false);
-    },
-    credentials: true,
-  },
+  cors: { origin: true, credentials: true },
 })
 export class NotificationsGateway implements OnGatewayConnection {
   @WebSocketServer()
