@@ -15,6 +15,7 @@ export interface AdvocateMatch {
   avatar_url: string | null;
   rating: string | null;
   rating_count: number;
+  matchReasons: string[];
 }
 
 // Columns selected for the advocate card — kept identical to the public directory.
@@ -57,6 +58,29 @@ const SCORE_SQL = `
   + CASE WHEN de.advocate_id IS NOT NULL THEN 15 ELSE 0 END
   + CASE WHEN $3 != '' AND $3 = ANY(a.languages)  THEN 10 ELSE 0 END
   )`.trim();
+
+function buildReasons(
+  row: {
+    location_match: boolean;
+    has_district_exp: boolean;
+    lang_match: boolean;
+    win_count: number | null;
+  },
+  district: string,
+  language: string,
+  matterType: string,
+): string[] {
+  const reasons: string[] = [];
+  if (row.location_match && district) reasons.push(`Practices in ${district}`);
+  const wins = row.win_count ?? 0;
+  if (wins > 0) reasons.push(`${wins} ${matterType} win${wins > 1 ? 's' : ''}`);
+  if (row.has_district_exp && district) reasons.push(`Court experience in ${district}`);
+  if (row.lang_match) {
+    const label = language === 'bn' ? 'Bengali' : language === 'hi' ? 'Hindi' : 'English';
+    reasons.push(`Speaks ${label}`);
+  }
+  return reasons;
+}
 
 @Injectable()
 export class MatchingService {
@@ -105,7 +129,11 @@ export class MatchingService {
            WHERE district = $2 AND $2 != ''
          )
          SELECT ${CARD_COLUMNS},
-                ${SCORE_SQL} AS score
+                ${SCORE_SQL} AS score,
+                ($2 != '' AND $2 = ANY(a.districts))  AS location_match,
+                (de.advocate_id IS NOT NULL)           AS has_district_exp,
+                ($3 != '' AND $3 = ANY(a.languages))  AS lang_match,
+                COALESCE(wc.win_count, 0)::int         AS win_count
          ${CARD_JOINS}
          LEFT JOIN win_counts wc   ON wc.advocate_id = a.id
          LEFT JOIN district_exp de ON de.advocate_id = a.id
@@ -117,7 +145,10 @@ export class MatchingService {
         [candidateTerms, districtVal, langVal, matterType, limit, offset],
       );
       return {
-        rows: result.rows.map(({ score: _s, ...row }) => row),
+        rows: result.rows.map(({ score: _s, location_match, has_district_exp, lang_match, win_count, ...row }) => ({
+          ...row,
+          matchReasons: buildReasons({ location_match, has_district_exp, lang_match, win_count }, districtVal, langVal, matterType),
+        })),
         total: practiceTotal,
       };
     }
@@ -139,7 +170,10 @@ export class MatchingService {
                     ELSE 0 END
              + CASE WHEN de.advocate_id IS NOT NULL THEN 15 ELSE 0 END
              + CASE WHEN $3 != '' AND $3 = ANY(a.languages) THEN 10 ELSE 0 END
-              ) AS score
+              ) AS score,
+              ($2 != '' AND $2 = ANY(a.districts))  AS location_match,
+              (de.advocate_id IS NOT NULL)           AS has_district_exp,
+              ($3 != '' AND $3 = ANY(a.languages))  AS lang_match
        ${CARD_JOINS}
        LEFT JOIN district_exp de ON de.advocate_id = a.id
        WHERE a.verification_status = 'verified'
@@ -149,7 +183,10 @@ export class MatchingService {
       [districtVal, districtVal, langVal, limit, offset],
     );
     return {
-      rows: fallback.rows.map(({ score: _s, ...row }) => row),
+      rows: fallback.rows.map(({ score: _s, location_match, has_district_exp, lang_match, ...row }) => ({
+        ...row,
+        matchReasons: buildReasons({ location_match, has_district_exp, lang_match, win_count: null }, districtVal, langVal, matterType),
+      })),
       total: countAll.rows[0].total,
     };
   }
