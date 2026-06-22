@@ -61,14 +61,7 @@ const RING_TIMEOUT_MS = 45_000;
  */
 @WebSocketGateway({
   namespace: '/call',
-  cors: {
-    origin: (origin: string, cb: (err: null, allow: boolean) => void) => {
-      const allowed = process.env.CORS_ORIGIN?.split(',') ?? ['*'];
-      if (allowed.includes('*') || !origin || allowed.includes(origin)) cb(null, true);
-      else cb(null, false);
-    },
-    credentials: true,
-  },
+  cors: { origin: true, credentials: true },
 })
 export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // Injected by Nest after construction (definite-assignment: not set in constructor).
