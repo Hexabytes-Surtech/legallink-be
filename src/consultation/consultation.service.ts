@@ -197,7 +197,8 @@ export class ConsultationService {
               cr.created_at, cr.updated_at,
               ca.id AS "appointmentId",
               ca.scheduled_at AS "scheduledAt",
-              ca.status AS "appointmentStatus"
+              ca.status AS "appointmentStatus",
+              EXISTS(SELECT 1 FROM consultation_feedback cf WHERE cf.consultation_id = cr.request_id AND cf.citizen_id = $1) AS "hasFeedback"
        FROM consultation_request cr
        JOIN matter m ON m.matter_id = cr.matter_id
        LEFT JOIN advocates a ON a.id = cr.advocate_id

@@ -10,6 +10,27 @@ import { CLOUDINARY_FOLDERS } from '../cloudinary/cloudinary.folders';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { AdvocatesQueryDto } from './dto/advocates-query.dto';
 
+// Canonical practice-area vocabulary (matches FE constants + public directory filter).
+const CANONICAL_PRACTICE_AREAS = new Set(['Criminal','Civil','Family','Labour','Tenancy','Traffic','Consumer']);
+// Normalise any stored or incoming practice_area label to the canonical Title Case form.
+const PA_NORMALISE: Record<string,string> = {
+  criminal_matter:'Criminal', criminal:'Criminal', criminal_offence:'Criminal',
+  civil_dispute:'Civil', civil:'Civil', cheque_bounce:'Civil', property_dispute:'Civil', property:'Civil',
+  family_law:'Family', domestic_violence:'Family', divorce:'Family', maintenance:'Family', dowry:'Family',
+  labour_dispute:'Labour', labour_law:'Labour', labour:'Labour', labour_employment:'Labour', employment:'Labour', workplace_harassment:'Labour',
+  tenancy_dispute:'Tenancy', tenancy:'Tenancy',
+  'motor_vehicle/traffic_offence':'Traffic', motor_vehicle:'Traffic', traffic_offence:'Traffic',
+  consumer_complaint:'Consumer', consumer_dispute:'Consumer', consumer:'Consumer',
+  corporate:'Civil', corporate_law:'Civil', family:'Family',
+};
+function normalisePracticeAreas(areas: string[] | undefined): string[] | undefined {
+  if (!areas) return undefined;
+  return areas.map(a => {
+    if (CANONICAL_PRACTICE_AREAS.has(a)) return a;
+    return PA_NORMALISE[a.toLowerCase()] ?? a;
+  });
+}
+
 @Injectable()
 export class AdvocateService {
   constructor(
@@ -22,9 +43,9 @@ export class AdvocateService {
   async getMe(userId: string) {
     const result = await this.db.query(
       `SELECT a.id AS advocate_id, a.name, a.address, a.phone, a.email AS advocate_email,
-              a.bar_enrolment_number, a.state_bar,
+              a.bar_enrolment_number, a.state_bar, a.bio,
               a.practice_areas, a.courts, a.languages, a.districts,
-              a.verification_status, a.created_at, a.updated_at,
+              a.verification_status, a.rejection_reason, a.created_at, a.updated_at,
               u.email AS auth_email, u.preferred_language, u.avatar_url
        FROM advocates a
        JOIN users u ON u.id = a.user_id
@@ -66,7 +87,7 @@ export class AdvocateService {
       bio: dto.bio,
       bar_enrolment_number: dto.barEnrolmentNumber,
       state_bar: dto.stateBar,
-      practice_areas: dto.practiceAreas,
+      practice_areas: normalisePracticeAreas(dto.practiceAreas),
       courts: dto.courts,
       languages: dto.languages,
       districts: dto.districts,
@@ -242,6 +263,7 @@ export class AdvocateService {
     return {
       advocateId: advocate.id,
       verificationStatus: advocate.verification_status,
+      rejectionReason: advocate.rejection_reason ?? null,
       profileCompleteness: this.calculateProfileCompleteness(advocate),
       consultationStats: stats.rows[0],
       averageRating: rating.rows[0].average_rating
@@ -384,7 +406,7 @@ export class AdvocateService {
   private async getMergedAdvocateProfile(userId: string, advocateId: string) {
     const result = await this.db.query(
       `SELECT a.id AS advocate_id, a.name, a.address, a.phone, a.email AS advocate_email,
-              a.bar_enrolment_number, a.state_bar,
+              a.bar_enrolment_number, a.state_bar, a.bio,
               a.practice_areas, a.courts, a.languages, a.districts,
               a.verification_status, a.created_at, a.updated_at,
               u.email AS user_email, u.preferred_language, u.avatar_url

@@ -64,8 +64,8 @@ export class AdminService {
     const { name, user_email } = existing.rows[0];
 
     await this.db.query(
-      `UPDATE advocates SET verification_status = $1, updated_at = now() WHERE id = $2`,
-      [newStatus, advocateId],
+      `UPDATE advocates SET verification_status = $1, rejection_reason = $2, updated_at = now() WHERE id = $3`,
+      [newStatus, action === 'reject' ? (reason ?? null) : null, advocateId],
     );
 
     // Category 5: Send email notification (non-fatal)
