@@ -5,8 +5,11 @@ import {
   ConflictException,
   ForbiddenException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { DatabaseService } from '../database/database.service';
 import { ConversationGateway } from '../conversation/conversation.gateway';
+import { NotificationsGateway } from '../conversation/notifications.gateway';
+import { EmailService } from '../email/email.service';
 import { CreateConsultationDto } from './dto/create-consultation.dto';
 import { ReportCitizenDto } from './dto/report-citizen.dto';
 import { UpdateStageDto, TIMELINE_STAGES } from './dto/update-stage.dto';
@@ -24,6 +27,9 @@ export class ConsultationService {
   constructor(
     private db: DatabaseService,
     private gateway: ConversationGateway,
+    private notifications: NotificationsGateway,
+    private email: EmailService,
+    private config: ConfigService,
   ) {}
 
   // ── POST /api/consultations ───────────────────────────────────────────────
@@ -75,7 +81,7 @@ export class ConsultationService {
 
     // Verify advocate exists and is verified
     const advocateResult = await this.db.query(
-      `SELECT id, verification_status FROM advocates WHERE id = $1`,
+      `SELECT id, user_id, verification_status FROM advocates WHERE id = $1`,
       [dto.advocateId],
     );
     if (!advocateResult.rows.length) throw new NotFoundException('ADVOCATE_NOT_FOUND');
@@ -179,6 +185,24 @@ export class ConsultationService {
       throw err;
     }
 
+    // Live nudge: light up the advocate's "Consultations" badge + refetch their list
+    // in real time (their dashboard pending count too). Best-effort.
+    this.notifications.emitDataChanged(advocateResult.rows[0].user_id, 'consultations', {
+      kind: 'consultation_requested',
+    });
+
+    // Let the advocate know a citizen wants to consult them — email with the matter
+    // details + a deep link to this request. Fire-and-forget: a mail hiccup must
+    // never fail the request the citizen has already successfully created.
+    this.notifyAdvocateOfRequest(
+      row.request_id,
+      dto.matterId,
+      dto.advocateId,
+      citizenUserId,
+      scheduledAt,
+      dto.citizenNote ?? null,
+    ).catch(() => {});
+
     return {
       consultationId: row.request_id,
       status: row.status,
@@ -186,6 +210,81 @@ export class ConsultationService {
       advocateId: row.advocate_id,
       createdAt: row.created_at,
     };
+  }
+
+  /**
+   * Build and send the "new consultation request" notification to the advocate.
+   * Pulls the advocate contact email, the citizen's display name and the matter
+   * text/category in a single query, then hands a fully-formed payload to the
+   * EmailService. Best-effort — callers invoke this without awaiting.
+   */
+  private async notifyAdvocateOfRequest(
+    consultationId: string,
+    matterId: string,
+    advocateId: string,
+    citizenUserId: string,
+    scheduledAt: Date | null,
+    citizenNote: string | null,
+  ): Promise<void> {
+    const res = await this.db.query(
+      `SELECT a.name AS advocate_name,
+              COALESCE(u.email, a.email) AS advocate_email,
+              m.intake_text, m.classification_json,
+              COALESCE(cu.name, 'A citizen') AS citizen_name
+       FROM advocates a
+       JOIN users u ON u.id = a.user_id
+       JOIN matter m ON m.matter_id = $2
+       LEFT JOIN users cu ON cu.id = $3
+       WHERE a.id = $1`,
+      [advocateId, matterId, citizenUserId],
+    );
+    if (!res.rows.length || !res.rows[0].advocate_email) return;
+    const r = res.rows[0];
+
+    const viewUrl = `${this.frontendBaseUrl()}/advocate/consultations/${consultationId}`;
+    await this.email.sendConsultationRequested(r.advocate_email, {
+      advocateName: r.advocate_name || 'Advocate',
+      citizenName: r.citizen_name,
+      category: this.humanizeMatterType(r.classification_json?.matterType),
+      matterSummary:
+        this.truncate(r.intake_text, 320) ||
+        'A new legal matter (no description was provided).',
+      citizenNote,
+      scheduledAtLabel: scheduledAt ? this.formatIstLabel(scheduledAt) : null,
+      viewUrl,
+    });
+  }
+
+  /** Frontend origin for email deep links: FRONTEND_URL → first CORS origin → localhost. */
+  private frontendBaseUrl(): string {
+    const explicit = this.config.get<string>('FRONTEND_URL');
+    if (explicit && explicit.trim()) return explicit.trim().replace(/\/+$/, '');
+    const first = (this.config.get<string>('CORS_ORIGIN') || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)[0];
+    return (first || 'http://localhost:3000').replace(/\/+$/, '');
+  }
+
+  /** Trim to `max` chars on a word-ish boundary, appending an ellipsis when cut. */
+  private truncate(text: string | null, max: number): string {
+    if (!text) return '';
+    const t = text.trim();
+    return t.length > max ? `${t.slice(0, max - 1).trimEnd()}…` : t;
+  }
+
+  /** Slugged AI matter type → readable label, e.g. "criminal_matter" → "Criminal Matter". */
+  private humanizeMatterType(raw: unknown): string | null {
+    if (typeof raw !== 'string' || !raw.trim()) return null;
+    return raw.trim().replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  /** UTC instant → friendly IST label, e.g. "16 Jun 2026, 14:30 IST". */
+  private formatIstLabel(instant: Date): string {
+    const { date, time } = instantToIstParts(instant);
+    const [y, mo, d] = date.split('-').map(Number);
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return `${d} ${months[mo - 1]} ${y}, ${time} IST`;
   }
 
   // ── GET /api/consultations/:id ────────────────────────────────────────────
@@ -283,6 +382,39 @@ export class ConsultationService {
   // Both participants. The advocate edits the timeline (PUT :id/stage and the close
   // flow); the citizen sees it read-only on the frontend. Ownership is the same dual
   // check getConsultation uses: own citizen_id OR own one of this user's advocate ids.
+  /**
+   * List the uploaded documents of the matter behind a consultation. Readable by
+   * EITHER participant (the citizen who owns the matter, or the advocate on the
+   * consultation) — so the advocate can review the citizen's evidence during the chat
+   * without exposing the owner-gated /matter/:id/documents route to non-owners.
+   */
+  async getMatterDocuments(consultationId: string, userId: string) {
+    const access = await this.db.query(
+      `SELECT cr.matter_id
+         FROM consultation_request cr
+        WHERE cr.request_id = $1
+          AND (cr.citizen_id = $2 OR cr.advocate_id IN (
+                SELECT id FROM advocates WHERE user_id = $2
+              ))`,
+      [consultationId, userId],
+    );
+    if (!access.rows.length) throw new NotFoundException('CONSULTATION_NOT_FOUND');
+
+    const docs = await this.db.query(
+      `SELECT id           AS "documentId",
+              matter_id     AS "matterId",
+              file_path     AS "fileUrl",
+              file_type     AS "fileType",
+              size,
+              uploaded_at   AS "uploadedAt"
+         FROM documents
+        WHERE matter_id = $1
+        ORDER BY uploaded_at ASC`,
+      [access.rows[0].matter_id],
+    );
+    return docs.rows;
+  }
+
   async getTimeline(consultationId: string, userId: string) {
     const result = await this.db.query(
       `SELECT cr.request_id AS "consultationId", cr.status,
@@ -558,6 +690,14 @@ export class ConsultationService {
       closed: true,
     });
 
+    // Refresh the OTHER party's consultation list/dashboard live (the actor's own
+    // client already refetches off the action response). The /ws close event above
+    // only reaches whoever is sitting in the chat room — this covers their lists.
+    const otherParty = by === 'citizen' ? row.advocate_user_id : row.citizen_id;
+    this.notifications.emitDataChanged(otherParty, 'consultations', {
+      kind: 'consultation_closed',
+    });
+
     return { consultationId, status: 'closed', by, outcomeKey: outcome };
   }
 
@@ -602,6 +742,11 @@ export class ConsultationService {
          RETURNING id, status, created_at`,
         [consultationId, row.advocate_id, row.citizen_id, dto.reason, dto.note ?? null],
       );
+      // Light up the admin "Reports" queue live for every connected admin.
+      this.notifications.emitDataChangedToRole('admin', 'admin-reports', {
+        kind: 'report_filed',
+      });
+
       return {
         reportId: ins.rows[0].id,
         consultationId,

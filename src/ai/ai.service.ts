@@ -25,6 +25,35 @@ export interface AiBriefResult {
   citationUnitIds: string[];
 }
 
+// Inline response returned by legallink-ai's POST /analyze.
+export interface AiAnalyzeResponse {
+  classification: {
+    matterType?: string;
+    statute?: string | null;
+    userQuestion?: string;
+    involvesPolice?: boolean;
+    safetyConcern?: boolean;
+    incidentDate?: string | null;
+    location?: { state: string; district: string | null };
+    applicableLaws?: { act: string; sections: string[]; confidence: string }[];
+    [key: string]: any;
+  };
+  citations: {
+    unitId?: string;
+    source?: string;
+    section?: string;
+    text?: string;
+    url?: string;
+    caseName?: string;
+    citation?: string;
+  }[];
+  brief: {
+    responseEnglish?: string;
+    responseBengali?: string;
+    disclaimer?: string;
+  };
+}
+
 // Keyword → act mapping for mock classification
 const KEYWORD_MAP: { keywords: string[]; matterType: string; actId: string; sections: string[] }[] = [
   {
@@ -68,6 +97,14 @@ const KEYWORD_MAP: { keywords: string[]; matterType: string; actId: string; sect
 const DISCLAIMER =
   'This is legal information only, not legal advice. Please consult a qualified advocate for your specific situation.';
 
+// Grounding is best-effort, but transient failures (the AI layer redeploying, a
+// network blip, a dropped SSE socket → undici "terminated") are common and
+// recoverable. Retry a few times with small backoff before giving up and running
+// the turn ungrounded. Real transient failures fail fast, so retries are quick.
+const GROUND_ATTEMPTS = 3;
+const GROUND_BACKOFF_MS = 400;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
@@ -85,24 +122,27 @@ export class AiService {
   // Dispatch order: Gemini → external AI service (AI_SERVICE_URL) → mock.
   // Each fallback logs WHY it triggered (fixes silent-AI-failure bug C1).
   async processMatter(matterId: string, queryText: string, language: string): Promise<void> {
-    if (this.gemini.isAvailable()) {
-      try {
-        await this.gemini.processMatter(matterId, queryText, language);
-        return;
-      } catch (err) {
-        this.logger.warn(
-          `Gemini failed for matter=${matterId} (${(err as Error).message}); falling back`,
-        );
-      }
-    }
-
+    // AI layer (legallink-rag) generates the grounded brief — PREFERRED. Gemini still
+    // powers the multi-turn triage chat (gemini-chat.service); only the one-shot brief
+    // path is rerouted here. Falls back to BE-Gemini, then the keyword mock.
     if (this.aiServiceUrl) {
       try {
         await this.callRealAiService(matterId, queryText, language);
         return;
       } catch (err) {
         this.logger.warn(
-          `External AI service unreachable for matter=${matterId} (${(err as Error).message}); falling back to mock`,
+          `AI layer (${this.aiServiceUrl}) failed for matter=${matterId} (${(err as Error).message}); falling back to Gemini`,
+        );
+      }
+    }
+
+    if (this.gemini.isAvailable()) {
+      try {
+        await this.gemini.processMatter(matterId, queryText, language);
+        return;
+      } catch (err) {
+        this.logger.warn(
+          `Gemini failed for matter=${matterId} (${(err as Error).message}); falling back to mock`,
         );
       }
     }
@@ -117,6 +157,141 @@ export class AiService {
         (err as Error).stack,
       );
       throw err;
+    }
+  }
+
+  // Lightweight grounding for the triage CHAT: ask the AI layer (legallink-rag)
+  // to retrieve real statute citations for the citizen's running narrative, so the
+  // conversation cites real law verbatim instead of Gemini's memory. Returns null
+  // (chat runs ungrounded) if no AI service is configured or it is unreachable.
+  async ground(
+    text: string,
+    language: string,
+    applicableLaws?: { act: string; sections: string[] }[],
+  ): Promise<{ matterType: string | null; applicableLaws: any[]; citations: any[] } | null> {
+    if (!this.aiServiceUrl) return null;
+    for (let attempt = 1; attempt <= GROUND_ATTEMPTS; attempt++) {
+      try {
+        const resp = await fetch(`${this.aiServiceUrl}/ground`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            language: language === 'bn' ? 'bn' : 'en',
+            applicable_laws: applicableLaws && applicableLaws.length ? applicableLaws : null,
+          }),
+          signal: AbortSignal.timeout(9000),
+        });
+        if (!resp.ok) {
+          // 5xx is transient (AI layer redeploying/overloaded) — retry; 4xx is not.
+          if (resp.status >= 500 && attempt < GROUND_ATTEMPTS) {
+            this.logger.warn(`AI grounding ${resp.status} (attempt ${attempt}/${GROUND_ATTEMPTS}), retrying`);
+            await sleep(GROUND_BACKOFF_MS * attempt);
+            continue;
+          }
+          this.logger.warn(`AI grounding responded ${resp.status}; chat runs ungrounded`);
+          return null;
+        }
+        const d = (await resp.json()) as {
+          matter_type?: string | null;
+          applicable_laws?: any[];
+          citations?: any[];
+        };
+        return {
+          matterType: d.matter_type ?? null,
+          applicableLaws: Array.isArray(d.applicable_laws) ? d.applicable_laws : [],
+          citations: Array.isArray(d.citations) ? d.citations : [],
+        };
+      } catch (err) {
+        const msg = (err as Error).message.slice(0, 80);
+        if (attempt < GROUND_ATTEMPTS) {
+          this.logger.warn(`AI grounding failed (${msg}); retry ${attempt}/${GROUND_ATTEMPTS}`);
+          await sleep(GROUND_BACKOFF_MS * attempt);
+          continue;
+        }
+        this.logger.warn(`AI grounding failed (${msg}); chat runs ungrounded`);
+        return null;
+      }
+    }
+    return null;
+  }
+
+  // Streaming grounding: consume the AI layer's /ground/stream SSE and yield each
+  // parsed event ({event, data}) so the chat can forward the agent's steps + sources
+  // to the citizen live (Perplexity-style). Yields nothing if the AI layer is down.
+  async *groundStream(
+    text: string,
+    language: string,
+  ): AsyncGenerator<{ event: string; data: any }> {
+    if (!this.aiServiceUrl) return;
+    const seenSources = new Set<string>();
+    let sawDone = false;
+
+    for (let attempt = 1; attempt <= GROUND_ATTEMPTS && !sawDone; attempt++) {
+      let resp: globalThis.Response;
+      try {
+        resp = await fetch(`${this.aiServiceUrl}/ground/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, language: language === 'bn' ? 'bn' : 'en' }),
+          signal: AbortSignal.timeout(25000),
+        });
+      } catch (err) {
+        this.logger.warn(`AI grounding stream connect failed (attempt ${attempt}/${GROUND_ATTEMPTS}): ${(err as Error).message.slice(0, 80)}`);
+        if (attempt < GROUND_ATTEMPTS) await sleep(GROUND_BACKOFF_MS * attempt);
+        continue;
+      }
+      if (!resp.ok || !resp.body) {
+        this.logger.warn(`AI grounding stream responded ${resp.status} (attempt ${attempt}/${GROUND_ATTEMPTS})`);
+        if (attempt < GROUND_ATTEMPTS) await sleep(GROUND_BACKOFF_MS * attempt);
+        continue;
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const block = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            let event = 'message';
+            let data = '';
+            for (const line of block.split('\n')) {
+              if (line.startsWith('event:')) event = line.slice(6).trim();
+              else if (line.startsWith('data:')) data += line.slice(5).trim();
+            }
+            if (!data) continue;
+            let parsed: any;
+            try {
+              parsed = JSON.parse(data);
+            } catch {
+              continue; // ignore malformed event
+            }
+            // On a retry the FE already appended the agent-trail steps — suppress them
+            // to avoid a doubled trail. Sources are de-duped (here + on the FE), so
+            // re-sending is safe; `done` carries the final state.
+            if (event === 'step' && attempt > 1) continue;
+            if (event === 'source') {
+              const id = String(parsed?.unit_id ?? parsed?.url ?? '');
+              if (id && seenSources.has(id)) continue;
+              if (id) seenSources.add(id);
+            }
+            if (event === 'done') sawDone = true;
+            yield { event, data: parsed };
+          }
+        }
+      } catch (err) {
+        // Socket dropped mid-stream (AI layer redeploying, network blip): undici throws
+        // "terminated". Retry if attempts remain; otherwise the turn continues ungrounded.
+        this.logger.warn(`AI grounding stream interrupted (attempt ${attempt}/${GROUND_ATTEMPTS}): ${(err as Error).message.slice(0, 80)}`);
+      }
+
+      if (!sawDone && attempt < GROUND_ATTEMPTS) await sleep(GROUND_BACKOFF_MS * attempt);
     }
   }
 
@@ -245,12 +420,77 @@ export class AiService {
     );
   }
 
+  // Internal request/response API: the AI microservice (legallink-ai) is pure
+  // compute — it classifies/retrieves/generates and RETURNS the result inline.
+  // The BE owns the matter row and persists what comes back (same writer as the
+  // mock + Gemini paths), so the AI service never touches our database.
   private async callRealAiService(matterId: string, queryText: string, language: string): Promise<void> {
-    const response = await fetch(`${this.aiServiceUrl}/process`, {
+    const response = await fetch(`${this.aiServiceUrl}/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ matter_id: matterId, query: queryText, language }),
     });
     if (!response.ok) throw new Error(`AI service responded ${response.status}`);
+
+    const result = (await response.json()) as AiAnalyzeResponse;
+    await this.persistAiResult(matterId, language, result);
+  }
+
+  // Writes the AI service's inline result into our schema — mirrors runMock so
+  // GET /matter/:id sees an identical shape regardless of which engine ran.
+  private async persistAiResult(
+    matterId: string,
+    language: string,
+    result: AiAnalyzeResponse,
+  ): Promise<void> {
+    const classification = result?.classification ?? {};
+    const citations = Array.isArray(result?.citations) ? result.citations : [];
+    const brief = result?.brief ?? ({} as AiAnalyzeResponse['brief']);
+
+    // 1 — classification + status on the matter row
+    await this.db.query(
+      `UPDATE matter
+         SET classification_json = $1,
+             category_primary    = $2,
+             confidence_score    = $3,
+             status              = 'brief_generated',
+             updated_at          = NOW()
+       WHERE matter_id = $4`,
+      [JSON.stringify(classification), classification.matterType ?? null, 0.8, matterId],
+    );
+
+    // 2 — bilingual brief (Gemini-schema keys getMatterById reads)
+    const briefJson = {
+      notice: brief?.disclaimer ?? DISCLAIMER,
+      en_main_analysis: brief?.responseEnglish ?? null,
+      bn_summary: brief?.responseBengali ?? null,
+    };
+    await this.db.query(
+      `INSERT INTO matter_brief_version (matter_id, language_code, brief_json, grounded)
+       VALUES ($1, $2, $3, $4)`,
+      [matterId, language === 'bn' ? 'bn' : 'en', JSON.stringify(briefJson), citations.length > 0],
+    );
+
+    // 3 — citation chips. unitId is a real legal_document_unit id from the AI
+    // retriever, so the matter_citation FK is satisfied.
+    let lexicalRank = 0;
+    for (const c of citations) {
+      if (!c.unitId) continue;
+      lexicalRank += 1;
+      try {
+        await this.db.query(
+          `INSERT INTO matter_citation (matter_id, unit_id, relevance_score, retrieval_method, lexical_rank)
+           VALUES ($1, $2, $3, 'lexical', $4)
+           ON CONFLICT DO NOTHING`,
+          [matterId, c.unitId, Math.max(0.1, 1 - lexicalRank * 0.05), lexicalRank],
+        );
+      } catch (err) {
+        this.logger.warn(`AI citation insert skipped (${(err as Error).message.slice(0, 80)})`);
+      }
+    }
+
+    this.logger.log(
+      `External AI brief persisted for matter=${matterId} (citations=${lexicalRank}).`,
+    );
   }
 }

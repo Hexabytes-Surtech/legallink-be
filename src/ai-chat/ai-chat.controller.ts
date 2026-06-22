@@ -7,7 +7,10 @@ import {
   Param,
   ParseUUIDPipe,
   UseGuards,
+  Res,
+  Logger,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { AiChatService } from './ai-chat.service';
 import { StartConversationDto } from './dto/start-conversation.dto';
@@ -20,6 +23,7 @@ import { AnonymousSessionId } from '../common/session/anonymous-session.decorato
 @ApiTags('AI Chat')
 @Controller('ai/conversation')
 export class AiChatController {
+  private readonly logger = new Logger(AiChatController.name);
   constructor(private readonly aiChat: AiChatService) {}
 
   // ── GET /api/ai/conversation  (history list for the signed-in citizen) ────
@@ -85,6 +89,38 @@ export class AiChatController {
       citizenId: user?.sub ?? null,
       sessionId: sessionId ?? null,
     });
+  }
+
+  // ── POST /api/ai/conversation/:id/message/stream  (Perplexity-style SSE) ──
+  // Streams: step (analyzing/searching/writing) → source (each citation) →
+  // token (answer prose) → done (final state). Consumed via fetch + ReadableStream.
+  @Post(':id/message/stream')
+  @UseGuards(OptionalJwtGuard)
+  @ApiOperation({ summary: 'Stream the agent steps + sources + answer for a turn (SSE)' })
+  async messageStream(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PostMessageDto,
+    @Res() res: Response,
+    @CurrentUser() user?: any,
+    @AnonymousSessionId() sessionId?: string,
+  ) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof (res as any).flushHeaders === 'function') (res as any).flushHeaders();
+    const caller = { citizenId: user?.sub ?? null, sessionId: sessionId ?? null };
+    try {
+      for await (const chunk of this.aiChat.streamMessage(id, dto.message, caller)) {
+        res.write(chunk);
+      }
+    } catch (err) {
+      const e = err as Error;
+      this.logger.error(`SSE stream crashed: conversation=${id} reason="${e.message}"`, e.stack);
+      res.write(`event: error\ndata: ${JSON.stringify({ message: e.message })}\n\n`);
+    } finally {
+      res.end();
+    }
   }
 
   // ── GET /api/ai/conversation/:id  (full transcript + state) ───────────────

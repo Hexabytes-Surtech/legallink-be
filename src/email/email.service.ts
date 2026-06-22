@@ -87,6 +87,104 @@ export class EmailService {
 </body></html>`;
   }
 
+  /**
+   * Pill-style CTA button (table-wrapped so it renders in Outlook, which ignores
+   * padding on bare <a>). `href` is escaped — it's built from config + a UUID, but
+   * we never trust an unescaped URL inside branded markup.
+   */
+  private ctaButton(label: string, href: string): string {
+    return `<table role="presentation" align="center" cellpadding="0" cellspacing="0" style="margin:6px auto 2px;">
+      <tr><td align="center" style="border-radius:12px;background:#0a78c0;background-image:linear-gradient(120deg,#0a78c0,#1aa3e8);">
+        <a href="${esc(href)}" target="_blank" style="display:inline-block;padding:14px 34px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;letter-spacing:.2px;">${esc(label)} &nbsp;&rarr;</a>
+      </td></tr>
+    </table>`;
+  }
+
+  /** One label/value line inside the matter card. `valueHtml` must already be safe. */
+  private detailRow(label: string, valueHtml: string): string {
+    return `<tr>
+      <td style="padding:5px 0;font-size:13px;color:#8a8f9e;width:118px;vertical-align:top;white-space:nowrap;">${label}</td>
+      <td style="padding:5px 0;font-size:14px;color:#16182b;font-weight:600;vertical-align:top;">${valueHtml}</td>
+    </tr>`;
+  }
+
+  /**
+   * Notify an advocate that a citizen has requested a consultation with them.
+   * Branded card with the matter details + a one-tap CTA that deep-links the
+   * advocate straight to this request in the LegalLink dashboard. Non-fatal:
+   * the caller fires this without awaiting the result.
+   */
+  async sendConsultationRequested(
+    to: string,
+    params: {
+      advocateName: string;
+      citizenName: string;
+      category?: string | null;
+      matterSummary: string;
+      citizenNote?: string | null;
+      scheduledAtLabel?: string | null;
+      viewUrl: string;
+    },
+  ): Promise<void> {
+    const {
+      advocateName,
+      citizenName,
+      category,
+      matterSummary,
+      citizenNote,
+      scheduledAtLabel,
+      viewUrl,
+    } = params;
+
+    const categoryChip = category
+      ? `<span style="display:inline-block;padding:5px 13px;border-radius:999px;background:#eef6fc;border:1px solid #cfe6f7;font-size:12px;font-weight:700;color:#0a3a5c;letter-spacing:.4px;text-transform:uppercase;">${esc(category)}</span>`
+      : '';
+
+    const scheduledRow = scheduledAtLabel
+      ? this.detailRow('Preferred time', esc(scheduledAtLabel))
+      : '';
+
+    const noteBlock = citizenNote
+      ? `<p style="margin:16px 0 6px;font-size:12px;color:#8a8f9e;text-transform:uppercase;letter-spacing:.6px;font-weight:700;">Note from the citizen</p>
+         <div style="padding:12px 14px;background:#f1f5fa;border-left:3px solid #0a78c0;border-radius:0 8px 8px 0;font-size:14px;line-height:21px;color:#3a3f4c;">${esc(citizenNote)}</div>`
+      : '';
+
+    const body = `
+      <p style="margin:0 0 6px;font-size:16px;color:#16182b;font-weight:600;">Hi ${esc(advocateName)},</p>
+      <p style="margin:0 0 22px;font-size:14px;line-height:22px;color:#5b6072;">
+        You've received a <strong style="color:#16182b;">new consultation request</strong> on LegalLink.
+        A citizen has asked to consult you about the matter below — review the details and respond when you're ready.
+      </p>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fbfe;border:1px solid #e2eef8;border-radius:14px;">
+        <tr><td style="padding:18px 20px;">
+          ${categoryChip ? `<div style="margin-bottom:14px;">${categoryChip}</div>` : ''}
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            ${this.detailRow('Requested by', esc(citizenName))}
+            ${scheduledRow}
+          </table>
+          <p style="margin:16px 0 6px;font-size:12px;color:#8a8f9e;text-transform:uppercase;letter-spacing:.6px;font-weight:700;">Matter</p>
+          <div style="font-size:14px;line-height:22px;color:#3a3f4c;">${esc(matterSummary)}</div>
+          ${noteBlock}
+        </td></tr>
+      </table>
+
+      <div style="margin:26px 0 2px;">${this.ctaButton('View the request', viewUrl)}</div>
+      <p style="margin:14px 0 0;font-size:13px;line-height:20px;color:#8a8f9e;text-align:center;">
+        Tap the button to open this request in LegalLink, where you can accept or decline it.
+      </p>`;
+
+    await this.send(
+      to,
+      'New consultation request on LegalLink',
+      this.renderShell(
+        'New consultation request',
+        body,
+        `${citizenName} has requested a consultation${category ? ` about ${category}` : ''}. Review and respond on LegalLink.`,
+      ),
+    );
+  }
+
   async sendAdvocateVerified(to: string, advocateName: string): Promise<void> {
     await this.send(
       to,

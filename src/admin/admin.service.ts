@@ -45,9 +45,9 @@ export class AdminService {
     action: 'approve' | 'reject',
     reason?: string,
   ) {
-    // Category 5: JOIN users to get email for notification
+    // Category 5: JOIN users to get email for notification (+ user_id for the live nudge)
     const existing = await this.db.query(
-      `SELECT a.id, a.name, u.email AS user_email
+      `SELECT a.id, a.name, a.user_id AS advocate_user_id, u.email AS user_email
        FROM advocates a
        LEFT JOIN users u ON u.id = a.user_id
        WHERE a.id = $1`,
@@ -63,7 +63,7 @@ export class AdminService {
     }
 
     const newStatus = action === 'approve' ? 'verified' : 'rejected';
-    const { name, user_email } = existing.rows[0];
+    const { name, user_email, advocate_user_id } = existing.rows[0];
 
     await this.db.query(
       `UPDATE advocates SET verification_status = $1, rejection_reason = $2, updated_at = now() WHERE id = $3`,
@@ -78,6 +78,13 @@ export class AdminService {
         this.emailService.sendAdvocateRejected(user_email, name ?? 'Advocate', reason).catch(() => {});
       }
     }
+
+    // Live: flip the advocate's own verification banner/badge in their open session,
+    // and drop this application off every admin's pending queue in real time.
+    this.notifications.emitDataChanged(advocate_user_id, 'verification', {
+      kind: action === 'approve' ? 'verification_approved' : 'verification_rejected',
+    });
+    this.notifications.emitDataChangedToRole('admin', 'admin-advocates');
 
     return {
       advocateId,
@@ -164,6 +171,10 @@ export class AdminService {
       }
     }
 
+    // The flagged-message queue just shrank (this message was cleared/dismissed) —
+    // refresh it live for every connected admin.
+    this.notifications.emitDataChangedToRole('admin', 'admin-moderation');
+
     return { messageId, moderationStatus: newStatus, action };
   }
 
@@ -211,6 +222,9 @@ export class AdminService {
        WHERE id = $3`,
       [newStatus, note?.trim() || null, reportId],
     );
+
+    // Keep every admin's reports queue in sync live (status moved off 'open').
+    this.notifications.emitDataChangedToRole('admin', 'admin-reports');
 
     return { reportId, status: newStatus, action };
   }

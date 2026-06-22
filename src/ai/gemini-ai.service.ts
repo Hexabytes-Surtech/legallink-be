@@ -66,8 +66,9 @@ OUTPUT FORMAT:
 Return STRICTLY a JSON object matching the schema. No prose outside the JSON. No markdown fences. No explanations. Just the JSON.`;
 
 // Models tried in order if the primary configured model returns retryable errors
-// across all retries. The primary model goes first.
-const FALLBACK_MODELS = ['gemini-flash-latest', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+// across all retries. The primary model goes first. Gemini 3 escape hatches added
+// (verified against generateContent); gemini-2.0-flash removed — being shut down (404).
+const FALLBACK_MODELS = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
 
 @Injectable()
 export class GeminiAiService {
