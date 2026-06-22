@@ -312,8 +312,11 @@ export class GeminiChatService {
       }
       const model = this.modelChain[m];
       const isPrimary = m === 0;
-      const maxAttempts = isPrimary ? 2 : 1;
-      const backoffMs = [0, 800];
+      // JSON-parse failures are transient model glitches; give the primary an extra
+      // attempt and let each fallback model try twice instead of once.
+      const isJsonError = lastError?.message?.toLowerCase().includes('not valid json');
+      const maxAttempts = isPrimary ? (isJsonError ? 3 : 2) : (isJsonError ? 2 : 1);
+      const backoffMs = [0, 800, 1200];
 
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         if (attempt > 0) {
@@ -420,7 +423,11 @@ export class GeminiChatService {
       msg.includes('temporary') ||
       msg.includes('timeout') ||
       msg.includes('exceeded') ||
-      msg.includes('aborted')
+      msg.includes('aborted') ||
+      // Model occasionally ignores responseMimeType and returns plain prose — treat
+      // as a transient failure so the retry + fallback chain gets a chance to fix it.
+      msg.includes('not valid json') ||
+      msg.includes('missing assistantreply')
     );
   }
 
@@ -503,7 +510,12 @@ export class GeminiChatService {
       responseMode,
       assistantReply: p.assistantReply || '',
       followUpQuestion: typeof p.followUpQuestion === 'string' ? p.followUpQuestion : '',
-      suggestedSteps: Array.isArray(p.suggestedSteps) ? p.suggestedSteps.map(String) : [],
+      // Suppress steps on triage turns where legal status is still undecided — the model
+      // sometimes returns them for greeting/meta replies where they make no sense.
+      suggestedSteps:
+        phase === 'triage' && isLegalProblem !== true
+          ? []
+          : Array.isArray(p.suggestedSteps) ? p.suggestedSteps.map(String) : [],
       emergencyContacts,
       // readyToConnect is only ever true on a legal ready turn, whatever the model said.
       readyToConnect:
