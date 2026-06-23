@@ -273,14 +273,24 @@ export class GeminiChatService {
   // gemini-3 only on 429/503 — never going back to 2.5 on the retry.
   private readonly sttModelChain = ['gemini-2.5-flash-lite', 'gemini-3-flash-preview'];
 
-  async transcribeAudio(base64Wav: string, lang: 'en' | 'bn'): Promise<string> {
+  async transcribeAudio(base64Wav: string, _lang: 'en' | 'bn'): Promise<string> {
     if (!this.client) throw new Error('Gemini client not initialised (GEMINI_API_KEY missing)');
 
-    const langName = lang === 'bn' ? 'Bengali (output in Bengali/Bangla script)' : 'English';
+    // Do NOT tell Gemini which language to output — that causes it to translate.
+    // Instead let it detect the language from the audio and transcribe in exactly
+    // the same script the speaker used. Bengali → বাংলা, English → English,
+    // code-switched (very common in Kolkata) → the mix preserved as spoken.
     const prompt =
-      `You are a precise speech-to-text engine. Transcribe the spoken audio verbatim in ${langName}. ` +
-      `Output ONLY the exact transcription text — no quotes, no preamble, no notes, no translation, no markdown. ` +
-      `If the audio is silent or unintelligible, output nothing at all.`;
+      `You are a multilingual speech-to-text engine specialised in Indian languages, ` +
+      `particularly Bengali and English as spoken in West Bengal, India. ` +
+      `Listen to the audio and transcribe it EXACTLY as the person spoke — word for word, ` +
+      `in the SAME language and script they used: ` +
+      `Bengali speech → Bangla script (বাংলা); ` +
+      `English speech → English; ` +
+      `mixed Bengali-English (code-switching, very common in Kolkata) → preserve both exactly as spoken, ` +
+      `Bengali parts in Bangla script, English parts in English. ` +
+      `DO NOT translate. DO NOT correct grammar. DO NOT add anything. ` +
+      `Output ONLY the spoken words. If silent or unintelligible, output nothing.`;
 
     let lastError: Error | undefined;
     for (const model of this.sttModelChain) {
