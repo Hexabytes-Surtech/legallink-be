@@ -1,0 +1,668 @@
+
+Table "advocate" {
+  "advocate_id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "name" text [not null]
+  "enrolment_number" text [unique, not null]
+  "practice_areas" "text[]" [not null, default: `'{}'::text[]`]
+  "languages" "text[]" [not null, default: `'{}'::text[]`]
+  "districts" "text[]" [not null, default: `'{}'::text[]`]
+  "verification_status" text [not null, default: `'pending'::text`]
+  "bio_text" text
+  "created_at" timestamp [default: `now()`]
+  "updated_at" timestamp [default: `now()`]
+}
+
+Table "advocate_availability" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "advocate_id" uuid [not null]
+  "day_of_week" integer [not null]
+  "start_time" time [not null]
+  "end_time" time [not null]
+  "slot_duration_minutes" integer [not null, default: 30]
+  "is_active" boolean [not null, default: true]
+
+  Checks {
+    `((day_of_week >= 0) AND (day_of_week <= 6))` [name: 'advocate_availability_day_of_week_check']
+    `(slot_duration_minutes = ANY (ARRAY[15, 30, 60]))` [name: 'advocate_availability_slot_duration_minutes_check']
+    `(end_time > start_time)` [name: 'chk_end_after_start']
+  }
+
+  Indexes {
+    (advocate_id, day_of_week, start_time) [unique, name: "uq_advocate_day_start"]
+    advocate_id [type: btree, name: "idx_avail_advocate_id"]
+    (advocate_id, day_of_week) [type: btree, name: "idx_avail_day"]
+  }
+}
+
+Table "advocate_verification_documents" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "advocate_id" uuid [not null]
+  "file_path" "character varying(500)" [not null]
+  "file_type" "character varying(100)" [not null]
+  "uploaded_at" timestamp [not null, default: `now()`]
+
+  Indexes {
+    advocate_id [type: btree, name: "idx_avd_advocate_id"]
+  }
+}
+
+Table "advocates" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "user_id" uuid [unique]
+  "bar_enrolment_number" "character varying(50)" [unique]
+  "state_bar" "character varying(100)" [not null]
+  "name" "character varying(255)" [not null]
+  "address" text [not null]
+  "email" "character varying(255)"
+  "practice_areas" "text[]" [not null, default: `'{}'::text[]`]
+  "courts" "text[]" [not null, default: `'{}'::text[]`]
+  "languages" "text[]" [not null, default: `'{}'::text[]`]
+  "districts" "text[]" [not null, default: `'{}'::text[]`]
+  "verification_status" "character varying(20)" [not null, default: `'pending'::charactervarying`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+  "phone" "character varying(20)" [not null, default: `''::charactervarying`]
+  "bio" text
+  "submitted_at" timestamp
+  "rejection_reason" text
+
+  Checks {
+    `((verification_status)::text = ANY ((ARRAY['pending'::character varying, 'submitted'::character varying, 'verified'::character varying, 'rejected'::character varying])::text[]))` [name: 'advocates_verification_status_check']
+  }
+
+  Indexes {
+    districts [type: gin, name: "idx_advocates_districts"]
+    languages [type: gin, name: "idx_advocates_languages"]
+    practice_areas [type: gin, name: "idx_advocates_practice_areas"]
+    user_id [type: btree, name: "idx_advocates_user_id"]
+    verification_status [type: btree, name: "idx_advocates_verification_status"]
+  }
+}
+
+Table "ai_conversation" {
+  "conversation_id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "citizen_id" uuid
+  "session_id" uuid
+  "matter_id" uuid
+  "language" text [not null, default: `'en'::text`]
+  "phase" text [not null, default: `'triage'::text`]
+  "is_legal" boolean
+  "ready_to_connect" boolean [not null, default: false]
+  "question_count" integer [not null, default: 0]
+  "classification_json" jsonb
+  "brief_json" jsonb
+  "expires_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `(language = ANY (ARRAY['en'::text, 'bn'::text]))` [name: 'ai_conversation_language_check']
+    `(phase = ANY (ARRAY['triage'::text, 'gathering'::text, 'ready'::text, 'closed'::text]))` [name: 'ai_conversation_phase_check']
+  }
+
+  Indexes {
+    citizen_id [type: btree, name: "idx_ai_conv_citizen"]
+    expires_at [type: btree, name: "idx_ai_conv_expires"]
+    matter_id [type: btree, name: "idx_ai_conv_matter"]
+    session_id [type: btree, name: "idx_ai_conv_session"]
+  }
+}
+
+Table "ai_conversation_message" {
+  "message_id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "conversation_id" uuid [not null]
+  "role" text [not null]
+  "content" text [not null]
+  "meta" jsonb
+  "created_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `(role = ANY (ARRAY['user'::text, 'assistant'::text]))` [name: 'ai_conversation_message_role_check']
+  }
+
+  Indexes {
+    (conversation_id, created_at) [type: btree, name: "idx_ai_conv_msg_conv"]
+  }
+}
+
+Table "citizen_report" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "consultation_id" uuid [not null]
+  "advocate_id" uuid [not null]
+  "citizen_id" uuid [not null]
+  "reason" text [not null]
+  "note" text
+  "status" text [not null, default: `'open'::text`]
+  "admin_note" text
+  "created_at" timestamp [not null, default: `now()`]
+  "reviewed_at" timestamp
+
+  Checks {
+    `(reason = ANY (ARRAY['abusive'::text, 'spam'::text, 'ended_unfairly'::text, 'off_platform_contact'::text, 'other'::text]))` [name: 'citizen_report_reason_check']
+    `(status = ANY (ARRAY['open'::text, 'reviewed'::text, 'dismissed'::text]))` [name: 'citizen_report_status_check']
+  }
+
+  Indexes {
+    created_at [type: btree, name: "idx_report_created"]
+    status [type: btree, name: "idx_report_status"]
+    consultation_id [type: btree, unique, name: "uq_report_consultation"]
+  }
+}
+
+Table "citizens" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "user_id" uuid [unique, not null]
+  "state" "character varying(100)" [not null, default: `'WB'::charactervarying`]
+  "district" "character varying(100)"
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Indexes {
+    district [type: btree, name: "idx_citizens_district"]
+    user_id [type: btree, name: "idx_citizens_user_id"]
+  }
+  Note: 'Citizen-specific profile row. One per user where role=citizen. Extended via users.name / users.address.'
+}
+
+Table "consultation_appointment" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "consultation_id" uuid [unique, not null]
+  "scheduled_at" timestamp [not null]
+  "duration_minutes" integer [not null, default: 30]
+  "status" text [not null, default: `'scheduled'::text`]
+  "advocate_notes" text
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+  "advocate_id" uuid [not null]
+
+  Checks {
+    `(status = ANY (ARRAY['scheduled'::text, 'completed'::text, 'cancelled'::text, 'no_show'::text]))` [name: 'consultation_appointment_status_check']
+  }
+
+  Indexes {
+    advocate_id [type: btree, name: "idx_appt_advocate_id"]
+    consultation_id [type: btree, name: "idx_appt_consultation_id"]
+    scheduled_at [type: btree, name: "idx_appt_scheduled_at"]
+    (advocate_id, scheduled_at) [type: btree, unique, name: "uq_appt_advocate_slot"]
+  }
+}
+
+Table "consultation_feedback" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "consultation_id" uuid [unique, not null]
+  "citizen_id" uuid [not null]
+  "advocate_id" uuid [not null]
+  "rating" integer [not null]
+  "comment" text
+  "is_visible" boolean [not null, default: true]
+  "created_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((rating >= 1) AND (rating <= 5))` [name: 'consultation_feedback_rating_check']
+  }
+
+  Indexes {
+    advocate_id [type: btree, name: "idx_feedback_advocate_id"]
+    created_at [type: btree, name: "idx_feedback_created_at"]
+  }
+}
+
+Table "consultation_request" {
+  "request_id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "matter_id" uuid [not null]
+  "advocate_id" uuid [not null]
+  "citizen_id" uuid
+  "status" text [not null, default: `'pending'::text`]
+  "citizen_note" text
+  "advocate_note" text
+  "created_at" timestamp [default: `now()`]
+  "updated_at" timestamp [default: `now()`]
+  "citizen_read" boolean [default: true]
+  "citizen_last_read_at" timestamp
+  "advocate_last_read_at" timestamp
+  "current_stage" text [not null, default: `'consultation_started'::text`]
+  "closure_outcome" text
+  "closure_summary" text
+  "closure_settlement" text
+  "closure_new_advocate" text
+  "closure_noc_issued" boolean
+  "closure_next_steps" text
+  "documents_returned" boolean [not null, default: false]
+  "fees_settled" boolean [not null, default: false]
+  "closed_at" timestamp
+
+  Checks {
+    `(status = ANY (ARRAY['pending'::text, 'accepted'::text, 'declined'::text, 'closed'::text]))` [name: 'consultation_request_status_check']
+    `(current_stage = ANY (ARRAY['consultation_started'::text, 'advice_review'::text, 'drafting'::text, 'legal_notice'::text, 'filed_in_court'::text, 'in_hearing'::text, 'closed'::text]))` [name: 'consultation_request_current_stage_check']
+    `(closure_outcome IS NULL OR closure_outcome = ANY (ARRAY['resolved'::text, 'settled'::text, 'withdrawn_by_client'::text, 'referred'::text, 'advice_only'::text, 'ended_early'::text, 'dismissed_procedure'::text, 'decided_unfavourably'::text]))` [name: 'consultation_request_closure_outcome_check']
+  }
+
+  Indexes {
+    (advocate_id, status) [type: btree, name: "idx_consult_advocate"]
+    matter_id [type: btree, name: "idx_consult_matter"]
+    status [type: btree, name: "idx_consult_status"]
+  }
+}
+
+Table "consultation_timeline_event" {
+  "event_id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "consultation_id" uuid [not null]
+  "stage_key" text [not null]
+  "note" text
+  "actor_type" text [not null, default: `'advocate'::text`]
+  "actor_id" uuid
+  "created_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `(stage_key = ANY (ARRAY['consultation_started'::text, 'advice_review'::text, 'drafting'::text, 'legal_notice'::text, 'filed_in_court'::text, 'in_hearing'::text, 'closed'::text]))` [name: 'consultation_timeline_event_stage_check']
+    `(actor_type = ANY (ARRAY['advocate'::text, 'citizen'::text, 'system'::text]))` [name: 'consultation_timeline_event_actor_check']
+  }
+
+  Indexes {
+    (consultation_id, created_at) [type: btree, name: "idx_cte_consultation"]
+  }
+}
+
+Table "consultations" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "matter_id" uuid [not null]
+  "citizen_id" uuid [not null]
+  "advocate_id" uuid [not null]
+  "status" "character varying(20)" [not null, default: `'requested'::charactervarying`]
+  "requested_at" timestamp [not null, default: `now()`]
+  "accepted_at" timestamp
+
+  Checks {
+    `((status)::text = ANY ((ARRAY['requested'::character varying, 'accepted'::character varying, 'declined'::character varying, 'closed'::character varying])::text[]))` [name: 'consultations_status_check']
+  }
+
+  Indexes {
+    advocate_id [type: btree, name: "idx_consultations_advocate_id"]
+    citizen_id [type: btree, name: "idx_consultations_citizen_id"]
+    matter_id [type: btree, name: "idx_consultations_matter_id"]
+    status [type: btree, name: "idx_consultations_status"]
+  }
+}
+
+Table "conversation_message" {
+  "message_id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "matter_id" uuid [not null]
+  "request_id" uuid [not null]
+  "sender_type" text [not null]
+  "sender_id" uuid
+  "content" text [not null]
+  "moderation_status" text [not null, default: `'cleared'::text`]
+  "moderation_flags" "text[]" [default: `'{}'::text[]`]
+  "created_at" timestamp [default: `now()`]
+  "attachment_url" text
+  "attachment_type" text
+  "attachment_name" text
+  "attachment_size" integer
+  "deleted_at" timestamp
+
+  Checks {
+    `((attachment_type IS NULL) OR (attachment_type = ANY (ARRAY['image'::text, 'pdf'::text])))` [name: 'conversation_message_attachment_type_check']
+    `(moderation_status = ANY (ARRAY['cleared'::text, 'flagged'::text, 'pending'::text, 'dismissed'::text]))` [name: 'conversation_message_moderation_status_check']
+    `(sender_type = ANY (ARRAY['citizen'::text, 'advocate'::text]))` [name: 'conversation_message_sender_type_check']
+  }
+
+  Indexes {
+    (matter_id, created_at) [type: btree, name: "idx_msg_matter"]
+    (request_id, created_at) [type: btree, name: "idx_msg_request"]
+  }
+}
+
+Table "documents" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "matter_id" uuid [not null]
+  "uploader_id" uuid [not null]
+  "file_path" "character varying(500)" [not null]
+  "file_type" "character varying(100)" [not null]
+  "size" integer [not null]
+  "uploaded_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `(size > 0)` [name: 'documents_size_check']
+  }
+
+  Indexes {
+    matter_id [type: btree, name: "idx_documents_matter_id"]
+    uploader_id [type: btree, name: "idx_documents_uploader_id"]
+  }
+}
+
+Table "legal_document_unit" {
+  "unit_id" uuid [pk, not null]
+  "source_id" text [not null]
+  "source_type" text [not null]
+  "jurisdiction_level" text [not null]
+  "state_code" text
+  "district_code" text
+  "court_code" text
+  "doc_title" text [not null]
+  "doc_version_id" uuid [not null]
+  "hierarchy_path" text [not null]
+  "node_type" text [not null]
+  "node_label" text
+  "citation_text" text
+  "language_code" text [not null]
+  "text_content" text [not null]
+  "effective_from" date
+  "effective_to" date
+  "legal_status" text [not null]
+  "checksum_sha256" text [not null]
+  "source_uri" text
+  "metadata_json" jsonb
+  "created_at" timestamp [default: `now()`]
+  "embedding" public.vector
+
+  Indexes {
+    embedding [type: ivfflat, name: "idx_ldu_embedding_ivfflat"]
+    `to_tsvector('english'::regconfig,((((((COALESCE(doc_title,''::text)||' '::text)||COALESCE(node_label,''::text))||' '::text)||COALESCE(citation_text,''::text))||' '::text)||COALESCE(text_content,''::text)))` [type: gin, name: "idx_ldu_fts_en"]
+    (jurisdiction_level, state_code, court_code) [type: btree, name: "idx_legal_document_unit_jurisdiction"]
+    (node_type, node_label) [type: btree, name: "idx_legal_document_unit_node"]
+    (source_id, source_type) [type: btree, name: "idx_legal_document_unit_source"]
+  }
+}
+
+Table "legal_hierarchy_edge" {
+  "parent_unit_id" uuid [not null]
+  "child_unit_id" uuid [not null]
+  "edge_type" text [not null]
+
+  Indexes {
+    (parent_unit_id, child_unit_id, edge_type) [pk, name: "legal_hierarchy_edge_pkey"]
+    child_unit_id [type: btree, name: "idx_lhe_child"]
+    edge_type [type: btree, name: "idx_lhe_edge_type"]
+  }
+}
+
+Table "legal_unit" {
+  "unit_id" uuid [pk, not null]
+  "act_id" text [not null]
+  "act_name" text [not null]
+  "citation" text [not null]
+  "hierarchy_path" text [not null]
+  "section_number" text [not null]
+  "section_title" text
+  "text_content" text [not null]
+  "legal_status" text [not null, default: `'active'::text`]
+  "language_code" text [not null, default: `'en'::text`]
+  "source_file" text
+  "source_sha256" text
+  "doc_type" text [not null]
+  "jurisdiction" text [not null]
+  "version_tag" text [not null, default: `'v1'::text`]
+  "created_at" timestamp [not null, default: `now()`]
+  "search_vector" tsvector
+
+  Indexes {
+    act_id [type: btree, name: "idx_legal_unit_act_id"]
+    (act_id, section_number) [type: btree, name: "idx_legal_unit_act_section"]
+    doc_type [type: btree, name: "idx_legal_unit_doc_type"]
+    jurisdiction [type: btree, name: "idx_legal_unit_jurisdiction"]
+    search_vector [type: gin, name: "idx_legal_unit_search_vector"]
+    section_number [type: btree, name: "idx_legal_unit_section_number"]
+  }
+}
+
+Table "matter" {
+  "matter_id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "citizen_id" uuid
+  "intake_text" text [not null]
+  "intake_language" text [not null, default: `'en'::text`]
+  "status" text [not null, default: `'created'::text`]
+  "category_primary" text
+  "category_secondary" "text[]"
+  "jurisdiction_state" text [default: `'WB'::text`]
+  "jurisdiction_district" text
+  "preferred_language" text [not null, default: `'en'::text`]
+  "incident_date" date
+  "urgency_level" text [default: `'medium'::text`]
+  "completeness_score" numeric(5,2)
+  "confidence_score" numeric(5,2)
+  "advocate_status" text [default: `'not_requested'::text`]
+  "classification_json" jsonb
+  "created_at" timestamp [default: `now()`]
+  "updated_at" timestamp [default: `now()`]
+  "human_review_required" boolean [not null, default: false]
+  "missing_info_questions" jsonb
+  "reviewer_note" text
+  "reviewed_at" timestamp
+  "session_id" uuid
+  "expires_at" timestamp
+
+  Indexes {
+    session_id [type: btree, name: "idx_matter_session_id"]
+  }
+}
+
+Table "matter_advocate_shortlist" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "matter_id" uuid [not null]
+  "advocate_id" uuid [not null]
+  "citizen_initiated" boolean [not null, default: false]
+  "created_at" timestamp [default: `now()`]
+
+  Indexes {
+    (matter_id, advocate_id) [unique, name: "matter_advocate_shortlist_matter_id_advocate_id_key"]
+  }
+}
+
+Table "matter_brief_version" {
+  "brief_id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "matter_id" uuid [not null]
+  "language_code" text [not null, default: `'en'::text`]
+  "brief_json" jsonb [not null]
+  "grounded" boolean [not null, default: false]
+  "generated_at" timestamp [default: `now()`]
+
+  Indexes {
+    matter_id [type: btree, name: "idx_mbv_matter_id"]
+  }
+}
+
+Table "matter_citation" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "matter_id" uuid [not null]
+  "unit_id" uuid [not null]
+  "relevance_score" numeric(8,6)
+  "retrieval_method" text [not null, default: `'hybrid'::text`]
+  "lexical_rank" integer
+  "semantic_rank" integer
+  "created_at" timestamp [default: `now()`]
+
+  Indexes {
+    matter_id [type: btree, name: "idx_mc_matter_id"]
+  }
+}
+
+Table "matter_event" {
+  "event_id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "matter_id" uuid [not null]
+  "event_type" text [not null]
+  "payload" jsonb [not null, default: `'{}'::jsonb`]
+  "actor_type" text [not null, default: `'system'::text`]
+  "created_at" timestamp [default: `now()`]
+
+  Indexes {
+    event_type [type: btree, name: "idx_me_event_type"]
+    matter_id [type: btree, name: "idx_me_matter_id"]
+  }
+}
+
+Table "matters" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "user_id" uuid
+  "session_id" uuid
+  "query_text" text [not null]
+  "query_language" "character varying(2)" [not null]
+  "classification" jsonb
+  "citations" jsonb
+  "ai_response_english" text
+  "ai_response_bengali" text
+  "disclaimer" text
+  "status" "character varying(20)" [not null, default: `'session-owned'::charactervarying`]
+  "expires_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((query_language)::text = ANY ((ARRAY['bn'::character varying, 'en'::character varying])::text[]))` [name: 'matters_query_language_check']
+    `((status)::text = ANY ((ARRAY['session-owned'::character varying, 'user-owned'::character varying, 'archived'::character varying])::text[]))` [name: 'matters_status_check']
+  }
+
+  Indexes {
+    expires_at [type: btree, name: "idx_matters_expires_at"]
+    session_id [type: btree, name: "idx_matters_session_id"]
+    status [type: btree, name: "idx_matters_status"]
+    user_id [type: btree, name: "idx_matters_user_id"]
+  }
+}
+
+Table "messages" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "consultation_id" uuid [not null]
+  "sender_type" "character varying(10)" [not null]
+  "sender_id" uuid [not null]
+  "content" text [not null]
+  "moderation_status" "character varying(15)" [not null, default: `'approved'::charactervarying`]
+  "created_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((moderation_status)::text = ANY ((ARRAY['approved'::character varying, 'pending'::character varying, 'flagged'::character varying])::text[]))` [name: 'messages_moderation_status_check']
+    `((sender_type)::text = ANY ((ARRAY['citizen'::character varying, 'advocate'::character varying])::text[]))` [name: 'messages_sender_type_check']
+  }
+
+  Indexes {
+    consultation_id [type: btree, name: "idx_messages_consultation_id"]
+    (consultation_id, created_at) [type: btree, name: "idx_messages_created_at"]
+  }
+}
+
+Table "push_subscription" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "user_id" uuid [not null]
+  "endpoint" text [unique, not null]
+  "p256dh" text [not null]
+  "auth" text [not null]
+  "user_agent" text
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Indexes {
+    user_id [type: btree, name: "idx_push_sub_user"]
+  }
+}
+
+Table "response_trace" {
+  "trace_id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "matter_id" uuid
+  "query_text" text [not null]
+  "query_language" text [not null, default: `'en'::text`]
+  "source_unit_ids" "uuid[]" [not null]
+  "verifier_status" text [not null, default: `'pass'::text`]
+  "created_at" timestamp [default: `now()`]
+  "brief_id" uuid
+  "sentence_index" integer
+  "sentence_text" text
+}
+
+Table "users" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "email" "character varying(255)" [unique, not null]
+  "email_verified" boolean [not null, default: false]
+  "role" "character varying(20)" [not null]
+  "preferred_language" "character varying(2)" [not null, default: `'en'::charactervarying`]
+  "otp_code" "character varying(255)"
+  "otp_expires_at" timestamp
+  "refresh_token" text
+  "refresh_token_expires_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+  "avatar_url" text [note: 'Cloudinary image URL — e.g. https://res.cloudinary.com/<cloud>/image/upload/v123/avatars/<user_id>.jpg']
+  "name" "character varying(255)" [note: 'Full display name — common to all roles']
+  "address" text [note: 'Home / correspondence address — common to all roles']
+
+  Checks {
+    `((preferred_language)::text = ANY ((ARRAY['bn'::character varying, 'en'::character varying])::text[]))` [name: 'users_preferred_language_check']
+    `((role)::text = ANY ((ARRAY['citizen'::character varying, 'advocate'::character varying, 'admin'::character varying])::text[]))` [name: 'users_role_check']
+  }
+
+  Indexes {
+    email [type: btree, name: "idx_users_email"]
+    refresh_token [type: btree, name: "idx_users_refresh_token"]
+    role [type: btree, name: "idx_users_role"]
+  }
+}
+
+Ref "advocate_availability_advocate_id_fkey":"advocates"."id" < "advocate_availability"."advocate_id" [delete: cascade]
+
+Ref "advocate_verification_documents_advocate_id_fkey":"advocates"."id" < "advocate_verification_documents"."advocate_id" [delete: cascade]
+
+Ref "advocates_user_id_fkey":"users"."id" < "advocates"."user_id" [delete: cascade]
+
+Ref "ai_conversation_citizen_fk":"users"."id" < "ai_conversation"."citizen_id" [delete: cascade]
+
+Ref "ai_conversation_matter_fk":"matter"."matter_id" < "ai_conversation"."matter_id" [delete: set null]
+
+Ref "ai_conversation_message_conv_fk":"ai_conversation"."conversation_id" < "ai_conversation_message"."conversation_id" [delete: cascade]
+
+Ref "citizen_report_advocate_fk":"advocates"."id" < "citizen_report"."advocate_id" [delete: cascade]
+
+Ref "citizen_report_citizen_fk":"users"."id" < "citizen_report"."citizen_id" [delete: cascade]
+
+Ref "citizen_report_consultation_fk":"consultation_request"."request_id" < "citizen_report"."consultation_id" [delete: cascade]
+
+Ref "citizens_user_id_fkey":"users"."id" < "citizens"."user_id" [delete: cascade]
+
+Ref "consultation_appointment_advocate_id_fkey":"advocates"."id" < "consultation_appointment"."advocate_id" [delete: cascade]
+
+Ref "consultation_appointment_consultation_id_fkey":"consultation_request"."request_id" < "consultation_appointment"."consultation_id" [delete: cascade]
+
+Ref "consultation_feedback_advocate_id_fkey":"advocates"."id" < "consultation_feedback"."advocate_id" [delete: restrict]
+
+Ref "consultation_feedback_citizen_id_fkey":"users"."id" < "consultation_feedback"."citizen_id" [delete: restrict]
+
+Ref "consultation_feedback_consultation_id_fkey":"consultation_request"."request_id" < "consultation_feedback"."consultation_id" [delete: cascade]
+
+Ref "consultation_request_advocate_id_fkey":"advocates"."id" < "consultation_request"."advocate_id" [delete: restrict]
+
+Ref "consultation_request_matter_id_fkey":"matter"."matter_id" < "consultation_request"."matter_id"
+
+Ref "consultation_timeline_event_consultation_fk":"consultation_request"."request_id" < "consultation_timeline_event"."consultation_id" [delete: cascade]
+
+Ref "consultations_advocate_id_fkey":"advocates"."id" < "consultations"."advocate_id" [delete: restrict]
+
+Ref "consultations_citizen_id_fkey":"users"."id" < "consultations"."citizen_id" [delete: restrict]
+
+Ref "consultations_matter_id_fkey":"matters"."id" < "consultations"."matter_id" [delete: restrict]
+
+Ref "conversation_message_matter_id_fkey":"matter"."matter_id" < "conversation_message"."matter_id"
+
+Ref "conversation_message_request_id_fkey":"consultation_request"."request_id" < "conversation_message"."request_id"
+
+Ref "documents_matter_id_fkey":"matter"."matter_id" < "documents"."matter_id" [delete: cascade]
+
+Ref "documents_uploader_id_fkey":"users"."id" < "documents"."uploader_id" [delete: restrict]
+
+Ref "legal_hierarchy_edge_child_unit_id_fkey":"legal_document_unit"."unit_id" < "legal_hierarchy_edge"."child_unit_id" [delete: cascade]
+
+Ref "legal_hierarchy_edge_parent_unit_id_fkey":"legal_document_unit"."unit_id" < "legal_hierarchy_edge"."parent_unit_id" [delete: cascade]
+
+Ref "matter_advocate_shortlist_advocate_id_fkey":"advocates"."id" < "matter_advocate_shortlist"."advocate_id" [delete: cascade]
+
+Ref "matter_advocate_shortlist_matter_id_fkey":"matter"."matter_id" < "matter_advocate_shortlist"."matter_id" [delete: cascade]
+
+Ref "matter_brief_version_matter_id_fkey":"matter"."matter_id" < "matter_brief_version"."matter_id" [delete: cascade]
+
+Ref "matter_citation_matter_id_fkey":"matter"."matter_id" < "matter_citation"."matter_id" [delete: cascade]
+
+Ref "matter_citation_unit_id_fkey":"legal_document_unit"."unit_id" < "matter_citation"."unit_id" [delete: cascade]
+
+Ref "matter_event_matter_id_fkey":"matter"."matter_id" < "matter_event"."matter_id" [delete: cascade]
+
+Ref "matters_user_id_fkey":"users"."id" < "matters"."user_id" [delete: set null]
+
+Ref "messages_consultation_id_fkey":"consultations"."id" < "messages"."consultation_id" [delete: cascade]
+
+Ref "push_subscription_user_fk":"users"."id" < "push_subscription"."user_id" [delete: cascade]

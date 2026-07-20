@@ -1,0 +1,96 @@
+Code Review — qa/platform-health (entire LegalLink backend)
+
+Scope: This is the first review of the branch, so I reviewed the full backend as built against production — 5,791 lines of new TypeScript across 79 source files (+ tests and SQL for context). I ran 9 finder angles + a gap sweep, then verified each candidate by reading the actual source. Below are the 15 most severe findings, ranked, all correctness/security (cleanup is summarized after).
+
+[
+  {
+    "file": "src/consultation/consultation.service.ts",
+    "line": 49,
+    "summary": "requestConsultation lets any authenticated citizen claim an anonymous matter (citizen_id IS NULL) it doesn't own, unlike getMatterById which checks session_id.",
+    "failure_scenario": "Citizen B obtains another user A's anonymous matterId (shared/leaked URL). `if (matter.citizen_id && matter.citizen_id !== citizenUserId)` only blocks when citizen_id is already set, so for a NULL-owner matter the check passes and line 110-114 runs `UPDATE matter SET citizen_id = B` — B permanently hijacks A's confidential matter, AI brief and documents, and A can never claim it."
+  },
+  {
+    "file": "src/identity/identity.service.ts",
+    "line": 155,
+    "summary": "An OTP bypass backdoor gated only by string env vars skips OTP verification entirely if the env is ever set in production.",
+    "failure_scenario": "`bypassOtp = BYPASS_OTP_FOR_TESTING === 'true' && otp === BYPASS_OTP_CODE` then `if (!bypassOtp)` skips the bcrypt OTP check. If BYPASS_OTP_FOR_TESTING leaks into a prod .env, anyone who knows the static BYPASS_OTP_CODE authenticates as any email with no real OTP — full auth bypass riding on a fragile `=== 'true'` flag."
+  },
+  {
+    "file": "src/consultation/consultation.service.ts",
+    "line": 120,
+    "summary": "Slot booking is a check-then-insert inside READ COMMITTED with no row lock and no (advocate_id, scheduled_at) unique/exclusion constraint, so the SLOT_ALREADY_BOOKED guard is not atomic.",
+    "failure_scenario": "Two citizens POST /api/consultations for the same advocate+scheduledAt concurrently. Both clash-SELECTs (line 120) see zero rows (uncommitted inserts invisible), both INSERT consultation_appointment → the slot is double-booked. Sql/013 has only `consultation_id UNIQUE`, no backstop. (The duplicate-consultation check at line 92 is likewise outside the tx → duplicate pending rows.)"
+  },
+  {
+    "file": "src/appointment/appointment.service.ts",
+    "line": 112,
+    "summary": "Reschedule runs the slot-clash SELECT and the scheduled_at UPDATE as two separate NON-transactional queries (no BEGIN, no lock) — an even weaker TOCTOU than the booking path.",
+    "failure_scenario": "Two parties reschedule into the same advocate slot concurrently (PUT /api/appointments/:id, action=reschedule). Both clash-SELECTs at line 112 return empty, both UPDATEs at line 123 land on the same advocate_id+scheduled_at instant → two live appointments collide on one slot."
+  },
+  {
+    "file": "src/advocate/advocate.service.ts",
+    "line": 88,
+    "summary": "updateProfile lets an already-verified advocate freely mutate bar_enrolment_number / state_bar (the credential that was verified) with no re-verification; verification_status stays 'verified'.",
+    "failure_scenario": "A verified advocate PUTs /advocate/profile with `barEnrolmentNumber` set to anyone else's number. The `UPDATE advocates SET ...` (line 111) writes it and never resets verification_status, so the public directory and getPublicProfile (which expose bar_enrolment_number) show a 'verified' advocate whose displayed credential was never checked."
+  },
+  {
+    "file": "src/identity/identity.service.ts",
+    "line": 79,
+    "summary": "The 6-digit login/registration OTP — the sole auth factor — is generated with Math.random() instead of a CSPRNG.",
+    "failure_scenario": "`Math.floor(100000 + Math.random() * 900000)` (also line 119) seeds the OTP from a non-cryptographic PRNG. Math.random() is not unpredictable; an attacker who samples OTP outputs can narrow/predict the next OTP for a target email and pass verifyOtp → account takeover. Use node:crypto (randomInt)."
+  },
+  {
+    "file": "src/availability/availability.service.ts",
+    "line": 113,
+    "summary": "Public getPublicSlots crashes with an unhandled 500 when ?from/?to are not valid dates, because they're passed unvalidated into istWallClockToInstant(...).toISOString().",
+    "failure_scenario": "GET /api/advocates/{uuid}/availability?from=abc — `from`/`to` are raw @Query strings (only id is ParseUUIDPipe'd; line 87 default only covers absent, not malformed). istWallClockToInstant('abc','00:00') builds an Invalid Date, and `new Date(NaN-330*60000).toISOString()` (line 113) throws `RangeError: Invalid time value` → 500 on an unauthenticated endpoint."
+  },
+  {
+    "file": "src/advocate/advocate.service.ts",
+    "line": 220,
+    "summary": "Declining a consultation that has a booked appointment never updates the appointment row, so its slot stays status='scheduled' and is blocked forever.",
+    "failure_scenario": "Citizen books with scheduledAt → consultation_appointment(status='scheduled') is created while the consultation is pending. Advocate declines via updateConsultation (line 220 only updates consultation_request). getPublicSlots (availability.service.ts:103-110) and the booking collision check both filter `ca.status='scheduled'` (not cr.status), so that advocate's time is permanently unavailable to every future citizen."
+  },
+  {
+    "file": "src/matter/matter.service.ts",
+    "line": 336,
+    "summary": "getMatchingAdvocates derives total/pages from the already-truncated result and passes unvalidated Number(page/limit) into the SQL LIMIT.",
+    "failure_scenario": "matchAdvocates is asked for `limit+offset` rows then sliced (line 337), so `total = advocates.length` is capped at limit+offset and `pages` is wrong — with >limit matches the client can never page past the first window. Separately, controller passes raw `Number(page)`/`Number(limit)` (matter.controller.ts:118-119); `?limit=abc` → NaN, `NaN>20` is false so no clamp, and NaN reaches `LIMIT $4` (matching.service.ts:57) → Postgres rejects 'NaN' → 500."
+  },
+  {
+    "file": "src/admin/admin.service.ts",
+    "line": 67,
+    "summary": "advocates.rejection_reason is written/read by code but added by NO committed migration — only a manual ALTER noted in HANDOFF.md — so any environment provisioned from Sql/ will 500.",
+    "failure_scenario": "verifyAdvocate `UPDATE advocates SET ... rejection_reason = $2` (line 67) and getMe's `SELECT a.rejection_reason` (advocate.service.ts:48) reference a column absent from Sql/016_Schema.sql and every migration (grep finds it only in src + PLATFORM_QA docs). On a fresh deploy, admin verify/reject and every advocate profile load throw `column \"rejection_reason\" does not exist` → 500."
+  },
+  {
+    "file": "src/advocate/advocate.service.ts",
+    "line": 266,
+    "summary": "getDashboard returns advocate.rejection_reason but getAdvocateByUserId doesn't SELECT that column, so the dashboard rejection reason is always null — the BUG-011 'expose from dashboard' fix is broken.",
+    "failure_scenario": "getDashboard (line 245) loads the advocate via getAdvocateByUserId, whose SELECT (lines 393-398) omits rejection_reason (and bio). Line 266 `rejectionReason: advocate.rejection_reason ?? null` is therefore always null, so a rejected advocate's dashboard never shows why — exactly what commit a2b55b1 claimed to fix. The same partial row also feeds calculateProfileCompleteness (missing bio undercounts)."
+  },
+  {
+    "file": "src/conversation/conversation.gateway.ts",
+    "line": 147,
+    "summary": "The WebSocket message handler has no try/catch around its DB insert, so a query rejection becomes an unhandled rejection and the message is silently lost.",
+    "failure_scenario": "In handleMessage, `await this.db.query(INSERT INTO conversation_message ...)` (line 147) is unguarded (unlike handleConnection). On any insert failure (DB blip), the async @SubscribeMessage promise rejects with no `client.emit('error', ...)`; the sender sees neither the message nor an error and the chat appears to hang."
+  },
+  {
+    "file": "src/advocate/advocate.service.ts",
+    "line": 213,
+    "summary": "Accept/decline reads status, checks it in JS, then UPDATEs without `AND status='pending'` and without a transaction (TOCTOU).",
+    "failure_scenario": "An advocate double-clicks Accept (or accept+decline race) on a consultation. Both requests pass the `status !== 'pending'` check at line 213 before either UPDATE (line 221) commits, so both UPDATEs run — sending two contradictory citizen emails, and a decline can overwrite an accept non-deterministically. Fix: `WHERE request_id=$3 AND status='pending'` + check rowCount."
+  },
+  {
+    "file": "src/matter/matter.service.ts",
+    "line": 332,
+    "summary": "getMatchingAdvocates ranks on matter.jurisdiction_district, but that column is never written anywhere — district comes only inside classification_json — so the district boost is permanently dead.",
+    "failure_scenario": "jurisdiction_district appears only in 3 reads across src and zero writes (the AI writer stores district in classification_json.location.district). So `district` is always NULL → the `a.districts && ARRAY[$2]` relevance boost (matching.service.ts:50) never fires and advocate ranking ignores location entirely → citizens get geographically irrelevant matches."
+  },
+  {
+    "file": "src/email/email.service.ts",
+    "line": 50,
+    "summary": "Advocate-controlled fields (name, decline reason) are interpolated raw into HTML emails delivered to citizens — HTML/link injection.",
+    "failure_scenario": "sendConsultationDeclined embeds `${advocateName}` and `${reason}` (line 50) and sendConsultationAccepted embeds `${advocateName}` (line 41) with no escaping, in emails sent to the citizen. An advocate sets their name/decline reason to `<a href=\"https://evil/phish\">verify here</a>`; the citizen receives attacker-controlled markup/links inside a LegalLink-branded email."
+  }
+]
