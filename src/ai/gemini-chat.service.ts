@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Multi-turn conversational TRIAGE engine for LegalLink.
@@ -227,10 +227,19 @@ Return STRICTLY one JSON object matching the schema. No prose outside JSON, and 
 
 // Models tried in order if the primary configured model returns retryable errors
 // across all retries. Mirrors GeminiAiService so both brains degrade the same way.
-// Gemini 3 models are escape hatches when the 2.5 family is overloaded (503); they're
-// verified against generateContent with our exact config (responseSchema +
-// thinkingBudget:0). gemini-2.0-flash removed — it's being shut down (404).
+// Gemini 3 models are escape hatches when the 2.5 family is overloaded (503).
+// gemini-2.0-flash removed — it's being shut down (404).
 const FALLBACK_MODELS = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
+
+// "Don't spend time thinking" is spelled differently per model family, and sending the
+// wrong one is a hard 400 INVALID_ARGUMENT (not retryable → the whole turn dies):
+//   Gemini 2.5  → thinkingBudget: 0   (thinkingLevel → 400)
+//   Gemini 3+   → thinkingLevel: MINIMAL (thinkingBudget → 400)
+// Our chain spans both families, and `gemini-flash-latest` is a moving alias that
+// crossed from 2.5 to 3.x on Google's side — which is exactly what broke chat. Decide
+// per model, and default unknown//new names to the 3+ spelling (the current API).
+const thinkingFor = (model: string) =>
+  model.includes('2.5') ? { thinkingBudget: 0 } : { thinkingLevel: ThinkingLevel.MINIMAL };
 
 // Hard caps so a slow/overloaded Gemini never hangs a turn past the citizen's
 // connection lifetime: each call is aborted after GEN_CALL_TIMEOUT_MS, and the whole
@@ -397,7 +406,7 @@ export class GeminiChatService {
                 maxOutputTokens: 3072,
                 // Thinking OFF: a grounded triage turn doesn't need a reasoning budget,
                 // and it was adding ~5s/turn. Cuts chat latency from ~8s to ~2-3s.
-                thinkingConfig: { thinkingBudget: 0 },
+                thinkingConfig: thinkingFor(model),
               },
             }),
             GEN_CALL_TIMEOUT_MS,
@@ -429,7 +438,10 @@ export class GeminiChatService {
         }
       }
 
-      if (lastError && !this.isRetryable(lastError)) throw lastError;
+      // A non-retryable error means "don't hammer THIS model again" — it does NOT mean
+      // the other models would fail too. A 400 is often model-specific (an arg one family
+      // accepts and another rejects), so fall through to the next model instead of dying
+      // here. Costs a few hundred ms per extra model; the total deadline still caps it.
       if (m < this.modelChain.length - 1) {
         this.logger.warn(`Gemini chat model=${model} exhausted retries; falling back to model=${this.modelChain[m + 1]}`);
       }
